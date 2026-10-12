@@ -70,7 +70,7 @@ function normalizeConfig(raw) {
   return cfg;
 }
 
-/** 还款日距今（旧口径，仅固定还款日估算；提醒引擎已改用日期引擎 payment.payDaysLeft，此函数保留给外部脚本复用） */
+/** 计算下次还款日距今天数（跨月自动顺延到次月） */
 function daysToRepay(repayDay, now) {
   const y = now.getFullYear();
   const m = now.getMonth() + 1; // 1-12
@@ -114,18 +114,15 @@ function feeItem(m, days, feeDayThreshold) {
 
 function repayItem(m, days) {
   const name = m.alias || m.name || '未命名卡片';
-  const p = m.payment || {};
   const title = days === 0 ? `今日还款：${name}` : `还款提醒：${name} ${days} 天后到期`;
   const body = [
     `- 银行：${m.bank || '—'}`,
     `- 卡片：${m.name || '—'}${m.alias ? `（${m.alias}）` : ''}`,
-    `- 本期账单日：${p.billDate || '—'}`,
-    `- 银行到期日：${p.dueDate || '—'}${p.isInGrace ? '（宽限期内，仍可还款）' : ''}`,
-    `- 最后还款日：${p.lastPayDate || '—'}（${days === 0 ? '就是今天' : `还有 ${days} 天`}）`,
+    `- 还款日：每月 ${m.repaymentDay} 日（${days === 0 ? '就是今天' : `还有 ${days} 天`}）`,
+    `- 账单日：每月 ${m.billingDay} 日`,
     `- 额度：¥${money(m.creditLimit)}`,
   ].join('\n');
-  // key 按最后还款日去重：同一天同一张卡只推一次，跨期（日期变化）可再次提醒
-  return { type: 'repay', key: `repay:${m.id}:${p.lastPayDate || todayStr().slice(0, 7)}`, title, body };
+  return { type: 'repay', key: `repay:${m.id}:${todayStr().slice(0, 7)}`, title, body };
 }
 
 function taskItem(m, remainDays, gap) {
@@ -158,6 +155,7 @@ function billItem(b, m, daysLeft) {
 function collectReminders(cards, cfg, now, bills) {
   now = now || new Date();
   const items = [];
+  const monthKey = todayStr(now).slice(0, 7);
   const remainDaysInMonth = daysInMonth(now.getFullYear(), now.getMonth() + 1) - now.getDate();
 
   for (const m of cards || []) {
@@ -166,12 +164,9 @@ function collectReminders(cards, cfg, now, bills) {
       const applicable = cfg.rules.feeDays.filter((d) => m.feeDays <= d).sort((a, b) => a - b);
       if (applicable.length) items.push(feeItem(m, m.feeDays, applicable[0]));
     }
-    // ② 还款日：基于日期引擎的「最后可还款日」（含宽限期与 afterBill 模式）。
-    //    旧实现按固定 repaymentDay + daysToRepay 估算，对「账单日后 N 天」还款的卡会按错误日期提醒，且宽限期不参与。
-    if (cfg.rules.repayBeforeDays > 0 && m.payment && Number.isFinite(m.payment.payDaysLeft)) {
-      const d = m.payment.payDaysLeft;
-      // 跳期后 payDaysLeft 指向下期最后还款日（最长约 2 个月），仅在提醒窗口内触发；
-      // 真正「已逾期」的账单由账单流水（billOverdueRemind）负责提醒
+    // ② 还款日
+    if (cfg.rules.repayBeforeDays > 0 && m.repaymentDay) {
+      const d = daysToRepay(m.repaymentDay, now);
       if (d >= 0 && d <= cfg.rules.repayBeforeDays) items.push(repayItem(m, d));
     }
     // ③ 月刷卡任务未达标（月末临近）

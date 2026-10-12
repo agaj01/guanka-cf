@@ -168,8 +168,8 @@ function renderMyCards() {
     '<button class="btn primary" id="btn-add-card">＋ 添加持卡</button>' +
     '<button class="btn" id="btn-export">导出持卡</button>' +
     '<select id="filter-select" class="filter-select">' +
-    option('all', '全部卡片', true) + option('repay', '本月需还款', true) + option('fee', '年费临近(30天)', true) +
-    option('met', '年费已达标', true) + option('unpaid', '有未还账单', true) + option('benefit', '有剩余权益', true) +
+    option('all', '全部卡片') + option('repay', '本月需还款') + option('fee', '年费临近(30天)') +
+    option('met', '年费已达标') + option('unpaid', '有未还账单') + option('benefit', '有剩余权益') +
     '</select>' +
     '<select id="sort-select" class="filter-select">' +
     option('name', '按名称') + option('fee', '按年费临近') + option('repay', '按还款临近') + option('bank', '按银行') +
@@ -218,10 +218,8 @@ function renderMyCards() {
   return html;
 }
 
-// isFilter：filter 与 sort 下拉框取值有交集（fee/repay），选中态必须各比各的，否则交叉误标
-function option(value, label, isFilter) {
-  const sel = isFilter ? state.filter === value : state.sort === value;
-  return '<option value="' + value + '"' + (sel ? ' selected' : '') + '>' + label + '</option>';
+function option(value, label) {
+  return '<option value="' + value + '"' + (state.filter === value || state.sort === value ? ' selected' : '') + '>' + label + '</option>';
 }
 
 function applyFilterSort(list) {
