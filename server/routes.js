@@ -11,11 +11,13 @@ const D = require('./dates');
 function getBills() { return store.read('bills', []); }
 
 // 年费达标状态（金山口径：无年费 / 手工声明 / 自动判定）
-function feeStatusOf(mc, now) {
+// ws 必须由调用方传入 waiverState() 的结果——原始持卡记录上没有 waiver 字段（那是 computeMyCard 的计算输出），
+// 之前直接读 mc.waiver 恒为 {}，导致免年费/刷免达标一律误报「未达标」
+function feeStatusOf(mc, now, ws) {
   const year = now.getFullYear();
   if (!(Number(mc.annualFee) > 0)) return '无年费';
   if (Number(mc.waivedYear) >= year && Number(mc.waivedYear) > 0) return '已达标(手工)';
-  const w = mc.waiver || {};
+  const w = ws || {};
   // 已刷核定期：填了往年 → 跨年后已刷数据自动失效
   const periodOk = !Number(mc.countPeriodYear) || Number(mc.countPeriodYear) >= year;
   let autoMet = false;
@@ -168,6 +170,12 @@ function feeDaysColor(days, needsPayment) {
   return 'default';
 }
 
+// 已豁免卡的年费预警：达标即显示达标来源，无年费卡片显示「无年费」
+function feeAlertOfWaived(mc, feeStatus) {
+  if (!(Number(mc.annualFee) > 0)) return '无年费';
+  return '本年豁免';
+}
+
 function computeMyCard(mc, now, idx) {
   now = now || new Date();
   idx = idx || buildIndexes();
@@ -185,7 +193,7 @@ function computeMyCard(mc, now, idx) {
   const yearSpend = recs.amount.filter((r) => r.date >= yearStart).reduce((s, r) => s + (Number(r.amount) || 0), 0);
   // 还款信息（宽限期 + 两种还款方式）与预警分级
   const payment = D.paymentInfo(mc, now);
-  const feeStatus = feeStatusOf(mc, now);
+  const feeStatus = feeStatusOf(mc, now, ws);
   const feeWaived = feeStatus !== '未达标';
   // 注意：nextFeeDate 是计算字段，必须先算出来再用于「距年费月数」
   const nextFeeDateStr = U.toDateStr(U.nextFeeDate(mc.feeMonth, mc.feeDay, now));
@@ -193,13 +201,15 @@ function computeMyCard(mc, now, idx) {
   const feeMonthsLeft = isNaN(nextFee.getTime())
     ? null
     : (nextFee.getFullYear() - now.getFullYear()) * 12 + (nextFee.getMonth() - now.getMonth());
-  const feeDaysLeft = mc.feeDays;
+  // 年费预警分级基于「距下次年费日天数」（原始记录无 feeDays 字段，之前读 mc.feeDays 恒为 undefined → 预警恒「正常」）
+  const feeDaysLeft = days;
+  const feeAlert = feeWaived ? feeAlertOfWaived(mc, feeStatus) : D.feeAlertOf(mc, feeDaysLeft, false);
   return {
     ...mc,
     benefits,
     payment,
     feeStatus,
-    feeAlert: D.feeAlertOf(mc, feeDaysLeft, feeWaived),
+    feeAlert,
     feeMonthsLeft,
     recent: recs.amount.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 5),
     monthSpend, yearSpend, totalSpend: recs.amount.reduce((s, r) => s + (Number(r.amount) || 0), 0),
@@ -214,7 +224,8 @@ function computeMyCard(mc, now, idx) {
   };
 }
 
-function computeStats(now, idx) {
+// computed 可传入已由 computeMyCard 算好的持卡列表（/api/mycards 场景），避免每张卡重复全量计算
+function computeStats(now, idx, computed) {
   now = now || new Date();
   idx = idx || buildIndexes();
   const myCards = getMyCards();
@@ -234,8 +245,7 @@ function computeStats(now, idx) {
     if (r.date >= monthStart) monthSpend += a;
     if (r.date >= yearStart) yearSpend += a;
   }
-  const feeExpiring = myCards
-    .map((m) => computeMyCard(m, now, idx))
+  const feeExpiring = (computed || myCards.map((m) => computeMyCard(m, now, idx)))
     .filter((m) => m.waiver.needsPayment && m.feeDays < 30)
     .sort((a, b) => a.feeDays - b.feeDays)
     .map((m) => ({ id: m.id, name: m.alias || m.name, bank: m.bank, feeDays: m.feeDays, annualFee: m.annualFee }));
@@ -371,7 +381,7 @@ async function handle(method, pathname, url, body) {
   }
 
   // ---- 统计 ----
-  if (pathname === '/api/stats') return json(computeStats(now));
+  if (pathname === '/api/stats') return json(computeStats(now, null, null));
 
   // ---- 卡种库 ----
   if (pathname === '/api/cards' && method === 'GET') {
@@ -453,8 +463,8 @@ async function handle(method, pathname, url, body) {
   if (pathname === '/api/mycards' && method === 'GET') {
     const idx = buildIndexes();
     const data = getMyCards().map((m) => computeMyCard(m, now, idx));
-    // 与统计合并返回，避免前端二次全量计算（原 /api/stats 单独请求重复遍历）
-    return json({ data, stats: computeStats(now, idx), banks: [...new Set(data.map((m) => m.bank))] });
+    // 与统计合并返回，复用已计算的持卡列表（此前 computeStats 内部对每张卡再跑一遍完整计算，全量开销翻倍）
+    return json({ data, stats: computeStats(now, idx, data), banks: [...new Set(data.map((m) => m.bank))] });
   }
   if (pathname === '/api/mycards' && method === 'POST') {
     const b = body || {};
@@ -630,7 +640,8 @@ async function handle(method, pathname, url, body) {
     const b = body || {};
     const count = validCount(b.count);
     if (count === null) return err('补录次数必须为大于 0 的整数');
-    if (st.used + count > st.total) return err('当前权益次数已用完（剩余 ' + Math.max(0, st.total - st.used) + ' 次）');
+    // -1 = 不限次，不做上限拦截（之前 st.used + count > -1 恒为真，不限次权益无法补录）
+    if (st.total >= 0 && st.used + count > st.total) return err('当前权益次数已用完（剩余 ' + Math.max(0, st.total - st.used) + ' 次）');
     const rec = {
       id: U.uid(), myCardId: mc.id, idx, type: 'count',
       date: U.parseDateStr(b.date) ? String(b.date) : U.todayStr(),
