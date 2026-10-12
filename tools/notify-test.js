@@ -141,6 +141,7 @@ async function main() {
   // 通过 routes 的内部函数验证：total=-1 时 count 接口不做上限拦截
   const routes = require('../server/routes');
   const { Store } = require('../server/db');
+  const U = require('../server/util');
   const fs = require('fs');
   const tmpDir = '.notify-test-data';
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -199,6 +200,47 @@ async function main() {
   check('手工声明当年豁免 → 已达标(手工) + 本年豁免', manual.feeStatus === '已达标(手工)' && manual.feeAlert === '本年豁免', manual.feeStatus + '/' + manual.feeAlert);
   store2.write('mycards', []); // 清理，避免污染
   fs.rmSync('.notify-test-data2', { recursive: true, force: true });
+
+  console.log();
+  console.log('=== 5.7 消费记录删除（R3-F1 回归）===');
+  const store4 = new Store('.notify-test-data4');
+  routes.init(store4);
+  const seed4 = store4.read('cards', [])[0];
+  const mcDel = {
+    id: 'mc_deltest', cardId: seed4.id, bank: seed4.bank, name: seed4.name, org: seed4.org, level: seed4.level,
+    annualFee: 0, waiverType: '消费刷免', waiverCondition: '1000', waiverPolicy: '',
+    alias: '删除测试', creditLimit: 10000, billingDay: 1, repaymentDay: 20, repayMode: 'fixed', repayValue: 20,
+    graceDays: 0, waivedYear: 0, countPeriodYear: 0, maxInterestDays: 0,
+    feeMonth: 1, feeDay: 1, last4: '', monthlySpendTarget: 0,
+    benefits: [], pointsDeducted: false, pointsDeductDate: null, assetWaived: false, assetWaivedDate: null, createdAt: new Date().toISOString(),
+  };
+  store4.write('mycards', [mcDel]);
+  const postCons = await routes.handle('POST', '/api/mycards/mc_deltest/consumptions', new URL('http://x/p'), { date: U.todayStr(), amount: 300, channel: '微信支付', category: '餐饮' });
+  check('记一笔 300 元成功', postCons && postCons.status === 201 && postCons.body.amount === 300, JSON.stringify(postCons));
+  const delId = postCons.body.id;
+  const delRes = await routes.handle('DELETE', '/api/mycards/mc_deltest/consumptions/' + delId, new URL('http://x/p'), {});
+  check('删除该笔成功', delRes && delRes.status === 200 && delRes.body.ok, JSON.stringify(delRes));
+  check('删除后消费表为空', store4.read('consumptions', []).length === 0, JSON.stringify(store4.read('consumptions')));
+  const delAgain = await routes.handle('DELETE', '/api/mycards/mc_deltest/consumptions/' + delId, new URL('http://x/p'), {});
+  check('重复删除返回 404', delAgain && delAgain.status === 404, JSON.stringify(delAgain));
+  // 笔数补录不支持删除
+  await routes.handle('POST', '/api/mycards/mc_deltest/consumptions/count', new URL('http://x/p'), { date: U.todayStr(), count: 2 });
+  const cntRec = store4.read('consumptions', [])[0];
+  const delCnt = await routes.handle('DELETE', '/api/mycards/mc_deltest/consumptions/' + cntRec.id, new URL('http://x/p'), {});
+  check('笔数补录拒绝删除', delCnt && delCnt.status === 400 && /不支持删除/.test(delCnt.body.error), JSON.stringify(delCnt));
+  store4.write('mycards', []);
+  fs.rmSync('.notify-test-data4', { recursive: true, force: true });
+
+  console.log();
+  console.log('=== 5.8 提醒检查并发互斥（R3-2 回归）===');
+  const store5 = new Store('.notify-test-data5');
+  routes.init(store5);
+  store5.write('notify', { enabled: true, intervalMinutes: 0, channels: { bark: { enabled: true, deviceKey: 'bkkey', server: base + '/bark' } } });
+  const [c1, c2] = await Promise.all([routes.runNotifyChecks(true), routes.runNotifyChecks(true)]);
+  const skippedOne = [c1, c2].filter((r) => r.skipped && /进行中/.test(r.reason || '')).length;
+  check('并发两次检查恰有一次被互斥跳过', skippedOne === 1, JSON.stringify([c1, c2]));
+  store5.write('notify', { enabled: false });
+  fs.rmSync('.notify-test-data5', { recursive: true, force: true });
 
   console.log();
   console.log('=== 6. 去重与推送记录 ===');

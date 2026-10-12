@@ -79,21 +79,24 @@ function serveStatic(res, pathname) {
 }
 
 const server = http.createServer(async (req, res) => {
-  let url;
+  let pathname;
   try {
-    url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
+    const url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
+    // 畸形编码（如 /%、/%E0%A4%A）会抛 URIError：必须接住返回 400，
+    // 否则 async 回调变成 rejected promise → unhandledRejection → 进程退出
+    pathname = decodeURIComponent(url.pathname);
+    var urlObj = url;
   } catch (e) {
     send(res, 400, { error: 'Bad request' });
     return;
   }
-  const pathname = decodeURIComponent(url.pathname);
   try {
     if (pathname.startsWith('/api/')) {
       let body = {};
       if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') {
         body = await readBody(req);
       }
-      const result = await routes.handle(req.method, pathname, url, body);
+      const result = await routes.handle(req.method, pathname, urlObj, body);
       if (result === undefined) { send(res, 404, { error: 'Not found' }); return; }
       if (result.shutdown) {
         send(res, 200, { ok: true, msg: '管卡服务正在安全退出…' });

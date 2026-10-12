@@ -349,6 +349,10 @@ input, select, textarea { font-family: inherit; font-size: 14px; }
 .record-table th { text-align: left; font-size: 12px; color: var(--text-3); padding: 6px 8px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
 .record-table td { padding: 7px 8px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
 .record-table .amount { font-weight: 600; text-align: right; }
+.row-del { width: 36px; text-align: center; }
+.link-btn { background: none; border: none; cursor: pointer; padding: 2px 6px; font-size: 12px; border-radius: 4px; color: var(--text-3); }
+.link-btn:hover { background: var(--surface-2); color: var(--text); }
+.link-btn.danger:hover { color: var(--red); background: var(--red-bg); }
 .record-group-header {
   display: flex; align-items: center; gap: 8px; padding: 9px 8px;
   font-weight: 700; font-size: 13px; cursor: pointer; user-select: none;

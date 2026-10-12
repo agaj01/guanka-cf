@@ -1128,16 +1128,16 @@ async function openRecordsModal(m, scope) {
   if (!recs.length) {
     body = '<div class="empty-tip">暂无记录</div>';
   } else if (scope === 'month') {
-    body = recordsTable(recs);
+    body = recordsTable(recs, true);
   } else if (scope === 'year') {
     const byMonth = groupBy(recs, (r) => r.date.slice(0, 7));
-    body = byMonth.map(([k, list]) => groupHtml(k + ' 月', list)).join('');
+    body = byMonth.map(([k, list]) => groupHtml(k + ' 月', list, true)).join('');
   } else {
     const byYear = groupBy(recs, (r) => r.date.slice(0, 4));
     body = byYear.map(([y, list]) => {
       const byMonth = groupBy(list, (r) => r.date.slice(0, 7));
       return '<div class="record-group"><div class="record-group-header" data-toggle><span class="collapse-arrow">▾</span>' + y + ' 年<span class="count">' + list.length + ' 笔</span><span class="sum">' + fmtMoney(sum(list)) + '</span></div>' +
-        '<div class="record-group-body">' + byMonth.map(([k2, l2]) => groupHtml(k2 + ' 月', l2)).join('') + '</div></div>';
+        '<div class="record-group-body">' + byMonth.map(([k2, l2]) => groupHtml(k2 + ' 月', l2, true)).join('') + '</div></div>';
     }).join('');
   }
   const total = recs.reduce((s, r) => s + r.amount, 0);
@@ -1145,18 +1145,36 @@ async function openRecordsModal(m, scope) {
     '<div class="scroll-y">' + body + '</div>',
     '<button class="btn primary" data-close>关闭</button>');
   bindRecordGroups($('#modal'));
+  bindRecordDelete($('#modal'), m.id);
 }
 
-function groupHtml(title, list) {
+function groupHtml(title, list, canDelete) {
   return '<div class="record-group"><div class="record-group-header" data-toggle><span class="collapse-arrow">▾</span>' + esc(title) +
     '<span class="count">' + list.length + ' 笔</span><span class="sum">' + fmtMoney(sum(list)) + '</span></div>' +
-    '<div class="record-group-body">' + recordsTable(list) + '</div></div>';
+    '<div class="record-group-body">' + recordsTable(list, canDelete) + '</div></div>';
 }
 
-function recordsTable(recs) {
-  return '<table class="record-table"><thead><tr><th>日期</th><th>渠道</th><th>分类</th><th>备注</th><th style="text-align:right">金额</th></tr></thead><tbody>' +
-    recs.map((r) => '<tr><td>' + esc(r.date) + '</td><td>' + esc(r.channel) + '</td><td>' + esc(r.category) + '</td><td>' + esc(r.note || '') + '</td><td class="amount">' + fmtMoney(r.amount) + '</td></tr>').join('') +
+function recordsTable(recs, canDelete) {
+  return '<table class="record-table"><thead><tr><th>日期</th><th>渠道</th><th>分类</th><th>备注</th><th style="text-align:right">金额</th>' + (canDelete ? '<th></th>' : '') + '</tr></thead><tbody>' +
+    recs.map((r) => '<tr><td>' + esc(r.date) + '</td><td>' + esc(r.channel) + '</td><td>' + esc(r.category) + '</td><td>' + esc(r.note || '') + '</td><td class="amount">' + fmtMoney(r.amount) + '</td>' +
+      (canDelete ? '<td class="row-del"><button class="link-btn danger" data-cons-del="' + esc(r.id) + '" title="删除这条记录">删</button></td>' : '') +
+      '</tr>').join('') +
     '</tbody></table>';
+}
+
+function bindRecordDelete(root, myCardId) {
+  $$('[data-cons-del]', root).forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.consDel;
+      if (!(await confirmDialog('确定删除这条消费记录？删除后统计与刷免进度将同步减少。'))) return;
+      try {
+        await api('/api/mycards/' + myCardId + '/consumptions/' + id, { method: 'DELETE' });
+        toast('已删除');
+        closeModal();
+        await loadAll();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  });
 }
 
 function bindRecordGroups(root) {
@@ -1184,7 +1202,7 @@ function openBenefitModal(m, idx) {
     field('日期', '<input id="b-date" type="date" value="' + today() + '">') +
     field('备注（可选）', '<input id="b-note" placeholder="如：上海机场T2">') +
     '</div>' +
-    '<div style="font-size:12px;color:var(--text-3);margin-top:8px">当前周期已用 ' + b.used + ' / ' + b.total + ' 次（' + esc(b.resetCycle) + '重置）</div>',
+    '<div style="font-size:12px;color:var(--text-3);margin-top:8px">当前周期已用 ' + b.used + ' 次（' + esc(b.resetCycle) + '重置' + (b.unlimited ? '，不限次数' : '，上限 ' + b.total + ' 次') + '）</div>',
     '<button class="btn" data-close>取消</button><button class="btn primary" id="btn-save-benefit">保存</button>');
   $('#btn-save-benefit').addEventListener('click', async () => {
     try {
@@ -1284,10 +1302,13 @@ function openImportModal() {
     '<div id="import-result" style="margin-top:10px"></div>',
     '<button class="btn" data-close>取消</button><button class="btn primary" id="btn-do-import">开始导入</button>');
   $('#btn-do-import').addEventListener('click', async () => {
+    const btn = $('#btn-do-import');
+    if (btn.disabled) return; // 防重复提交：文件读取+解析期间按钮置灰
     const file = $('#import-file').files[0];
     let text = $('#import-text').value;
     if (file) text = await file.text();
     if (!text.trim()) return toast('请选择文件或粘贴内容', 'error');
+    btn.disabled = true;
     try {
       const r = await api('/api/cards/import', { method: 'POST', body: { csv: text } });
       $('#import-result').innerHTML =
@@ -1297,6 +1318,7 @@ function openImportModal() {
       toast('导入完成');
       await loadAll();
     } catch (e) { toast(e.message, 'error'); }
+    btn.disabled = false;
   });
 }
 

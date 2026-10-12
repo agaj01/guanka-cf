@@ -334,6 +334,7 @@ function matchRoute(method, pathname) {
     ['GET', /^\/api\/mycards\/([^/]+)\/consumptions$/],
     ['POST', /^\/api\/mycards\/([^/]+)\/consumptions$/],
     ['POST', /^\/api\/mycards\/([^/]+)\/consumptions\/count$/],
+    ['DELETE', /^\/api\/mycards\/([^/]+)\/consumptions\/([^/]+)$/],
     ['GET', /^\/api\/mycards\/([^/]+)\/benefits\/(\d+)\/history$/],
     ['POST', /^\/api\/mycards\/([^/]+)\/benefits\/(\d+)\/usage$/],
     ['POST', /^\/api\/mycards\/([^/]+)\/benefits\/(\d+)\/count$/],
@@ -605,6 +606,19 @@ async function handle(method, pathname, url, body) {
     return json(rec, 201);
   }
 
+  // 删除单条消费记录（金额类）；笔数补录不支持删除（进度按笔累计、无撤销语义）
+  const consDelMatch = pathname.match(/^\/api\/mycards\/([^/]+)\/consumptions\/([^/]+)$/);
+  if (consDelMatch && method === 'DELETE') {
+    const mc = getMyCards().find((m) => m.id === consDelMatch[1]);
+    if (!mc) return err('持卡不存在', 404);
+    const recs = getConsumptions();
+    const rec = recs.find((r) => r.id === consDelMatch[2] && r.myCardId === mc.id);
+    if (!rec) return err('消费记录不存在', 404);
+    if (rec.type !== 'amount') return err('笔数补录记录不支持删除');
+    store.write('consumptions', recs.filter((r) => r.id !== rec.id));
+    return json({ ok: true });
+  }
+
   // ---- 权益 ----
   const benHisMatch = pathname.match(/^\/api\/mycards\/([^/]+)\/benefits\/(\d+)\/history$/);
   if (benHisMatch && method === 'GET') {
@@ -841,7 +855,19 @@ function normalizeBenefits(benefits, fallbackNames) {
 }
 
 // 提醒检查：force=true 时忽略节流（手动触发）；否则按 intervalMinutes 节流
+// 检查包含网络推送（可能数秒），用互斥标志防止定时 tick 与手动 check 并发执行 → 重复推送
+let notifyChecking = false;
 async function runNotifyChecks(force) {
+  if (notifyChecking) return { skipped: true, reason: '上一次提醒检查仍在进行中' };
+  notifyChecking = true;
+  try {
+    return await runNotifyChecksInner(force);
+  } finally {
+    notifyChecking = false;
+  }
+}
+
+async function runNotifyChecksInner(force) {
   const cfg = reminder.normalizeConfig(store.read('notify', null));
   if (!cfg.enabled) return { skipped: true, reason: '提醒未启用' };
   if (!force && cfg.lastCheckAt) {
