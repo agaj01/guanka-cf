@@ -1,0 +1,157 @@
+'use strict';
+
+// ---------- 金额解析：支持 50000 / 5万 / 1.5万 / 10,000 / 1亿 ----------
+function parseAmount(v) {
+  if (v == null) return 0;
+  if (typeof v === 'number') return v;
+  const s = String(v).trim().replace(/,/g, '');
+  if (!s) return 0;
+  const m = s.match(/^(-?\d+(?:\.\d+)?)\s*(亿|万|千|百)?/);
+  if (!m) return 0;
+  let n = parseFloat(m[1]);
+  switch (m[2]) {
+    case '亿': n *= 1e8; break;
+    case '万': n *= 1e4; break;
+    case '千': n *= 1e3; break;
+    case '百': n *= 1e2; break;
+    default: break;
+  }
+  return Math.round(n * 100) / 100;
+}
+
+// ---------- 日期工具（本地时区，YYYY-MM-DD 字符串） ----------
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function toDateStr(d) {
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+
+function todayStr() { return toDateStr(new Date()); }
+
+function parseDateStr(s) {
+  const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+
+function daysBetween(fromStr, to) {
+  const a = parseDateStr(fromStr);
+  if (!a) return 0;
+  return Math.round((startOfDay(to) - startOfDay(a)) / 86400000);
+}
+
+// 下一个年费收取日（>= 今天）
+function nextFeeDate(feeMonth, feeDay, now) {
+  const y = now.getFullYear();
+  let d = new Date(y, feeMonth - 1, feeDay);
+  if (startOfDay(d) < startOfDay(now)) d = new Date(y + 1, feeMonth - 1, feeDay);
+  return d;
+}
+
+// 月份天数（month 1-12）
+function daysInMonth(year, month) {
+  return new Date(year, month, 0).getDate();
+}
+
+// 年费月日钳制：日超出当月天数时收到月末（2 月 31 → 2 月 28/29），避免 Date 静默滚月
+function clampFeeDate(month, day) {
+  const y = new Date().getFullYear();
+  const m = Math.min(12, Math.max(1, Math.round(Number(month) || 1)));
+  const dMax = daysInMonth(y, m);
+  const d = Math.min(dMax, Math.max(1, Math.round(Number(day) || 1)));
+  return { m, d };
+}
+
+// 距下次年费日天数
+function feeCountdown(feeMonth, feeDay, now) {
+  return Math.round((nextFeeDate(feeMonth, feeDay, now) - startOfDay(now)) / 86400000);
+}
+
+// 卡年起点：最近一个已过去的年费日（用于刷免进度统计区间）
+function cardYearStart(feeMonth, feeDay, now) {
+  const y = now.getFullYear();
+  let d = new Date(y, feeMonth - 1, feeDay);
+  if (d > now) d = new Date(y - 1, feeMonth - 1, feeDay);
+  return d;
+}
+
+// 权益周期起点
+function cycleStart(resetCycle, feeMonth, feeDay, now) {
+  if (resetCycle === '自然月') return new Date(now.getFullYear(), now.getMonth(), 1);
+  if (resetCycle === '自然年') return new Date(now.getFullYear(), 0, 1);
+  return cardYearStart(feeMonth, feeDay, now); // 年费日重置
+}
+
+// 记录所属周期 key（用于历史归档）
+function cycleKeyOf(resetCycle, feeMonth, feeDay, dateStr) {
+  if (resetCycle === '自然月') return dateStr.slice(0, 7);
+  if (resetCycle === '自然年') return dateStr.slice(0, 4);
+  const md = pad2(feeMonth) + '-' + pad2(feeDay);
+  const y = +dateStr.slice(0, 4);
+  return (dateStr.slice(5) >= md ? y : y - 1) + '-' + md + ' 起';
+}
+
+function cycleLabelOf(resetCycle, feeMonth, feeDay, dateStr) {
+  if (resetCycle === '自然月') return dateStr.slice(0, 7);
+  if (resetCycle === '自然年') return dateStr.slice(0, 4) + ' 年';
+  return cycleKeyOf(resetCycle, feeMonth, feeDay, dateStr);
+}
+
+// ---------- CSV ----------
+function parseCSV(text) {
+  text = String(text || '').replace(/^\uFEFF/, '');
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      row.push(field); field = '';
+    } else if (c === '\n') {
+      row.push(field); rows.push(row); row = []; field = '';
+    } else if (c !== '\r') {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((f) => String(f).trim() !== ''));
+}
+
+function toCSV(rows) {
+  const body = rows.map((r) => r.map((f) => {
+    f = f == null ? '' : String(f);
+    return /[",\n\r]/.test(f) ? '"' + f.replace(/"/g, '""') + '"' : f;
+  }).join(',')).join('\r\n');
+  return '\uFEFF' + body;
+}
+
+// ---------- 杂项 ----------
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+function fmtMoney(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtInt(n) {
+  return (Number(n) || 0).toLocaleString('zh-CN');
+}
+
+module.exports = {
+  parseAmount, toDateStr, todayStr, parseDateStr, startOfDay, daysBetween,
+  nextFeeDate, feeCountdown, daysInMonth, clampFeeDate, cardYearStart, cycleStart, cycleKeyOf, cycleLabelOf,
+  parseCSV, toCSV, uid, fmtMoney, fmtInt,
+};

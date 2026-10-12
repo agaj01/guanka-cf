@@ -1,0 +1,7 @@
+# 统一行尾，避免 Windows/Linux 混用时 Dockerfile 与脚本出现 CRLF 问题
+* text=auto eol=lf
+
+# 明确二进制，不做行尾转换
+*.png binary
+*.ico binary
+*.zip binary

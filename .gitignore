@@ -1,0 +1,16 @@
+# 运行时数据（用户隐私数据不入库，容器内由卷承载）
+data/*.json
+data/error.log
+data/*.tmp
+
+# 测试/基准产物
+.test-data/
+.bench-data/
+*.log
+
+# 依赖与系统文件
+node_modules/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

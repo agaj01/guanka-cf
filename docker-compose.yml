@@ -1,0 +1,14 @@
+services:
+  guanka:
+    build: .
+    image: credit-card-manager:1.0.0
+    container_name: credit-card-manager
+    ports:
+      - "3000:3000"          # 浏览器访问 http://localhost:3000
+    volumes:
+      - guanka-data:/app/data   # 持卡、消费、权益数据持久化
+    restart: unless-stopped
+    # 如需改端口，把上面改成 "8080:3000" 这样访问 http://localhost:8080
+
+volumes:
+  guanka-data:
