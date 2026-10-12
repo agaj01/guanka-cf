@@ -311,8 +311,17 @@ input, select, textarea { font-family: inherit; font-size: 14px; }
 .pick-card-name { flex: 1; font-size: 13px; }
 .pick-card-meta { font-size: 11px; color: var(--text-3); }
 
+/* 账单提示行 */
+.bill-hint { margin-top: 8px; font-size: 12px; color: var(--text-2); line-height: 1.8; }
+/* 筛选下拉 */
+.filter-select {
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--text); outline: none; font-size: 13px;
+}
+.filter-select:focus { border-color: var(--gold); }
+
 /* 权益编辑行 */
-.benefit-row { display: grid; grid-template-columns: 1fr 90px 110px 32px; gap: 8px; margin-bottom: 8px; align-items: center; }
+.benefit-row { display: grid; grid-template-columns: 1.2fr 1fr 66px 96px 118px 30px; gap: 8px; margin-bottom: 8px; align-items: center; }
 .benefit-row input, .benefit-row select {
   padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--surface); color: var(--text); outline: none; width: 100%;

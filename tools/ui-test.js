@@ -22,21 +22,32 @@ async function fetchMyCards() {
   return r.data || r;
 }
 
+// 测试目标卡 id（确保后的「笔数刷免」持卡），供后续按 id 精确定位行
+let testCardId = null;
+
 // 前置：确保库里有一张「笔数刷免」持卡且别名非空（供进度/编辑断言使用）
 async function ensureTestCard() {
   const cards = await (await fetch(BASE + '/api/cards')).json();
   const target = cards.find((c) => c.waiverType === '笔数刷免');
   if (!target) return;
   const mine = await fetchMyCards();
-  if (mine.some((m) => m.cardId === target.id && m.alias)) return;
-  const exist = mine.find((m) => m.cardId === target.id);
+  // 以别名为准做幂等（历史运行可能已把同名卡的别名改掉）
+  const exist = mine.find((m) => m.alias === '测试卡');
   if (exist) {
-    await fetch(BASE + '/api/mycards/' + exist.id, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ alias: '测试卡' }),
-    });
+    if (exist.cardId !== target.id) {
+      await fetch(BASE + '/api/mycards/' + exist.id, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cardId: target.id }),
+      });
+    }
+    testCardId = exist.id;
     return;
   }
+  const created = await (await fetch(BASE + '/api/mycards', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cardId: target.id, alias: '测试卡', feeMonth: 3, feeDay: 15 }),
+  })).json();
+  testCardId = created.id;
   await fetch(BASE + '/api/mycards', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cardId: target.id, alias: '测试卡', feeMonth: 3, feeDay: 15 }),
@@ -86,12 +97,16 @@ async function main() {
   check('持卡列表渲染出卡片行', !!row);
   if (row) {
     check('卡片行显示银行分组', !!row.closest('.bank-group'));
-    check('年费徽章渲染', /年费还有 \d+ 天|年费已免/.test(text('.card-row .fee-cell')));
-    check('刷免进度渲染（笔数刷免）', /\/ \d+ 笔/.test(row.textContent) && (row.textContent.includes('剩余') || row.textContent.includes('已达标')));
+    check('年费徽章渲染', /年费还有 \d+ 天|年费已免|无年费|本年豁免/.test(text('.card-row .fee-cell')), text('.card-row .fee-cell'));
+    // 精确定位 ensureTestCard 建的「测试卡」（笔数刷免）：用渲染后的别名全角引号包裹形式，避免命中「UI测试卡」
+    const countRow = $$('.card-row').find((r) => r.textContent.includes('\u201c测试卡\u201d'));
+    check('刷免进度渲染（笔数刷免）', !!countRow && /\/ \d+ 笔/.test(countRow.textContent) && (countRow.textContent.includes('剩余') || countRow.textContent.includes('已达标')), countRow ? countRow.textContent.slice(0, 120) : '未找到测试卡行');
   }
 
   // ---- 3. 详情抽屉 ----
-  const detailBtn = $('.card-row [data-act="detail"]');
+  // 打开「测试卡」的抽屉（其权益为有限次，便于验证「次数用完」拦截）
+  const targetRow = $$('.card-row').find((r) => r.dataset.id === testCardId) || $('.card-row');
+  const detailBtn = $('[data-act="detail"]', targetRow);
   detailBtn.click();
   const drawerOpen = await waitFor(() => $('#drawer') && $('#drawer').querySelector('.drawer-body'));
   check('点击详情打开抽屉', drawerOpen);
@@ -101,8 +116,8 @@ async function main() {
     check('抽屉含年费信息', dText.includes('年费信息') && dText.includes('下期年费日'));
     check('抽屉含每月刷卡任务', dText.includes('每月刷卡任务'));
     check('抽屉含消费记录区', dText.includes('消费记录') && dText.includes('记一笔'));
-    check('抽屉含权益使用明细', dText.includes('权益使用明细') && dText.includes('重置'));
-    check('抽屉权益显示已用次数', /已用 \d+ \/ \d+/.test(dText));
+    check('抽屉含权益使用明细', $$('#drawer .benefit-block').length > 0, 'block 数=' + $$('#drawer .benefit-block').length);
+    check('抽屉权益显示已用次数', /已用 \d+ \/ (\d+|不限)/.test(dText), dText.slice(0, 160));
   }
 
   // ---- 3.5 编辑持卡 ----
@@ -306,7 +321,45 @@ async function main() {
     check('打开提醒设置弹窗', false, '未找到提醒按钮');
   }
 
-  // ---- 14. 页面错误 ----
+  // ---- 14. 账单流水（P0-3）----
+  const billRow = $$('.card-row').find((r) => r.dataset.id === testCardId);
+  if (billRow) {
+    $('[data-act="detail"]', billRow).click();
+    const hasBills = await waitFor(() => $('#drawer') && $('#drawer [data-act="bill-gen"]'));
+    check('抽屉含账单流水区块', hasBills);
+    if (hasBills) {
+      $('#drawer [data-act="bill-gen"]').click();
+      const created = await waitFor(() => $('#drawer tr[data-bill-id]'));
+      check('生成本期账单成功', created);
+      if (created) {
+        const toggle = $('#drawer [data-act="bill-toggle"]');
+        toggle.click();
+        const paid = await waitFor(() => $('#drawer').textContent.includes('已还'));
+        check('标记已还并自动填还款日期', paid);
+      }
+    }
+    $$('#drawer [data-act="close"]').forEach((b) => b.click());
+  } else {
+    check('抽屉含账单流水区块', false, '未找到测试卡行');
+  }
+
+  // ---- 15. 筛选与排序（P2-2）----
+  const filterSel = $('#filter-select');
+  const sortSel = $('#sort-select');
+  check('筛选与排序控件存在', !!filterSel && !!sortSel);
+  if (filterSel && sortSel) {
+    filterSel.value = 'unpaid';
+    filterSel.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await sleep(150);
+    const okFilter = $$('.card-row').length > 0 || !!$('.empty-tip');
+    check('切换筛选后页面正常渲染', okFilter);
+    sortSel.value = 'fee';
+    sortSel.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await sleep(150);
+    check('切换排序后页面正常渲染', $$('.card-row').length > 0 || !!$('.empty-tip'));
+  }
+
+  // ---- 16. 页面错误 ----
   check('运行期间无未捕获页面错误', pageErrors.length === 0, pageErrors.join('; '));
 
   // ---- 汇总 ----

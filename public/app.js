@@ -80,8 +80,11 @@ const state = {
   settings: { theme: 'light', bankOrder: [], banksCollapsed: {}, cardBanksCollapsed: {} },
   myCards: [],
   cards: [],
+  bills: [],
   stats: null,
   drawerId: null,
+  filter: 'all',
+  sort: 'name',
 };
 
 const CYCLE_BADGE = { '自然月': 'badge-blue', '自然年': 'badge-purple', '年费日': 'badge-orange' };
@@ -96,14 +99,15 @@ async function boot() {
 
 async function loadAll() {
   // mycards 响应已合并 stats/banks（服务端一次索引计算），省去一次全量统计请求
-  const [settings, meta, mycardsResp, cards] = await Promise.all([
-    api('/api/settings'), api('/api/meta'), api('/api/mycards'), api('/api/cards'),
+  const [settings, meta, mycardsResp, cards, bills] = await Promise.all([
+    api('/api/settings'), api('/api/meta'), api('/api/mycards'), api('/api/cards'), api('/api/bills'),
   ]);
   state.settings = settings;
   state.meta = meta;
   state.myCards = mycardsResp.data || mycardsResp;
   state.stats = mycardsResp.stats || (await api('/api/stats'));
   state.cards = cards;
+  state.bills = bills || [];
   applyTheme(settings.theme || 'light');
   render();
 }
@@ -163,6 +167,13 @@ function renderMyCards() {
     '<div class="toolbar">' +
     '<button class="btn primary" id="btn-add-card">＋ 添加持卡</button>' +
     '<button class="btn" id="btn-export">导出持卡</button>' +
+    '<select id="filter-select" class="filter-select">' +
+    option('all', '全部卡片') + option('repay', '本月需还款') + option('fee', '年费临近(30天)') +
+    option('met', '年费已达标') + option('unpaid', '有未还账单') + option('benefit', '有剩余权益') +
+    '</select>' +
+    '<select id="sort-select" class="filter-select">' +
+    option('name', '按名称') + option('fee', '按年费临近') + option('repay', '按还款临近') + option('bank', '按银行') +
+    '</select>' +
     '<div class="spacer"></div>' +
     '<span style="font-size:12px;color:var(--text-3)">数据保存在 Docker 卷中，重启不丢失</span>' +
     '</div>';
@@ -171,8 +182,18 @@ function renderMyCards() {
     return html + '<div class="empty-tip">还没有持卡，点右上角「添加持卡」开始管理吧</div>';
   }
 
+  const filtered = applyFilterSort(state.myCards);
+  if (!filtered.length) {
+    return html + '<div class="empty-tip">当前筛选条件下没有卡片，换个筛选试试</div>';
+  }
+
+  // 非名称/银行排序时以平铺列表展示（排序优先级高于分组）
+  if (state.sort !== 'name' && state.sort !== 'bank') {
+    return html + '<div class="bank-group"><div class="bank-body">' + filtered.map(cardRowHtml).join('') + '</div></div>';
+  }
+
   const byBank = {};
-  for (const m of state.myCards) {
+  for (const m of filtered) {
     if (!byBank[m.bank]) byBank[m.bank] = [];
     byBank[m.bank].push(m);
   }
@@ -197,6 +218,25 @@ function renderMyCards() {
   return html;
 }
 
+function option(value, label) {
+  return '<option value="' + value + '"' + (state.filter === value || state.sort === value ? ' selected' : '') + '>' + label + '</option>';
+}
+
+function applyFilterSort(list) {
+  let out = list.slice();
+  const f = state.filter;
+  if (f === 'repay') out = out.filter((m) => (m.payment && m.payment.payDaysLeft <= 7));
+  else if (f === 'fee') out = out.filter((m) => m.waiver.needsPayment && m.feeDays <= 30);
+  else if (f === 'met') out = out.filter((m) => m.feeStatus && m.feeStatus !== '未达标');
+  else if (f === 'unpaid') out = out.filter((m) => unpaidCount(m) > 0);
+  else if (f === 'benefit') out = out.filter((m) => (m.benefits || []).some((b) => b.total < 0 || (b.remaining != null && b.remaining > 0)));
+  const s = state.sort;
+  if (s === 'fee') out.sort((a, b) => a.feeDays - b.feeDays);
+  else if (s === 'repay') out.sort((a, b) => (a.payment ? a.payment.payDaysLeft : 999) - (b.payment ? b.payment.payDaysLeft : 999));
+  else if (s === 'bank') out.sort((a, b) => String(a.bank).localeCompare(String(b.bank), 'zh'));
+  return out;
+}
+
 function statCard(label, value, sub, warn, id) {
   return '<div class="stat-card' + (id ? ' clickable' : '') + '"' + (id ? ' id="' + id + '"' : '') + '>' +
     '<div class="stat-label">' + label + '</div>' +
@@ -205,19 +245,36 @@ function statCard(label, value, sub, warn, id) {
 }
 
 function cardRowHtml(m) {
+  const p = m.payment || {};
   return '<div class="card-row" data-id="' + m.id + '">' +
     '<div><div class="card-name">' + esc(m.name) + (m.alias ? '<span class="alias">“' + esc(m.alias) + '”</span>' : '') + '</div>' +
-    '<div class="card-sub">' + esc(m.bank) + ' · ' + esc(m.org) + ' · ' + esc(m.level) + ' · 额度 ' + fmtMoney(m.creditLimit) + (m.last4 ? ' · 尾号 ' + esc(m.last4) : '') + '</div></div>' +
+    '<div class="card-sub">' + esc(m.bank) + ' · ' + esc(m.org) + ' · ' + esc(m.level) + ' · 额度 ' + fmtMoney(m.creditLimit) + (m.last4 ? ' · 尾号 ' + esc(m.last4) : '') + '</div>' +
+    '<div class="card-sub">还款 ' + esc(p.dueDate || '—') + (p.lastPayDate && p.lastPayDate !== p.dueDate ? '（最晚 ' + esc(p.lastPayDate) + '）' : '') + ' · 账单日 ' + (m.billingDay || '—') + '</div></div>' +
     '<div class="waiver-cell">' + waiverCellHtml(m) + '</div>' +
-    '<div class="fee-cell">' + feeBadgeHtml(m) + '</div>' +
+    '<div class="fee-cell">' + repayBadgeHtml(m) + ' ' + feeBadgeHtml(m) + '</div>' +
     '<div><button class="btn small" data-act="detail">详情</button></div>' +
     '</div>';
 }
 
+const REPAY_BADGE = { '已逾期': 'badge-red', '今日到期': 'badge-red', '3天内': 'badge-yellow', '本周内': 'badge-yellow', '正常': 'badge-default' };
+const FEE_ALERT_BADGE = { '无年费': 'badge-green', '本年豁免': 'badge-green', '已过日': 'badge-red', '7天内': 'badge-red', '本月内': 'badge-yellow', '正常': 'badge-default' };
+
+function repayBadgeHtml(m) {
+  const p = m.payment || {};
+  const txt = p.repayAlert || '正常';
+  if (txt === '正常') return '';
+  return '<span class="badge ' + (REPAY_BADGE[txt] || 'badge-default') + '">还款' + esc(txt) + '</span>';
+}
+
 function feeBadgeHtml(m) {
-  if (!m.waiver.needsPayment) return '<span class="badge badge-green">年费已免</span>';
-  const cls = FEE_BADGE[m.feeDaysColor] || 'badge-default';
-  return '<span class="badge ' + cls + '">年费还有 ' + m.feeDays + ' 天</span>';
+  const alert = m.feeAlert;
+  // 豁免态直接显示状态；其余保留「还有 N 天」主信息，再叠加预警标签
+  if (alert === '无年费' || alert === '本年豁免') return '<span class="badge badge-green">' + esc(alert) + '</span>';
+  const cls = FEE_ALERT_BADGE[alert] || (FEE_BADGE[m.feeDaysColor] || 'badge-default');
+  const main = m.waiver.needsPayment ? '年费还有 ' + m.feeDays + ' 天' : '年费已免';
+  let s = '<span class="badge ' + cls + '">' + main + '</span>';
+  if (alert && alert !== '正常') s += ' <span class="badge ' + cls + '">' + esc(alert) + '</span>';
+  return s;
 }
 
 function waiverCellHtml(m) {
@@ -322,6 +379,11 @@ function bindPageEvents() {
   if (addBtn) addBtn.addEventListener('click', openAddCardModal);
   const expBtn = $('#btn-export', app);
   if (expBtn) expBtn.addEventListener('click', exportCards);
+
+  const filterSel = $('#filter-select', app);
+  if (filterSel) filterSel.addEventListener('change', (e) => { state.filter = e.target.value; render(); });
+  const sortSel = $('#sort-select', app);
+  if (sortSel) sortSel.addEventListener('change', (e) => { state.sort = e.target.value; render(); });
 
   // 卡种库按钮
   const newType = $('#btn-new-card-type', app);
@@ -435,7 +497,9 @@ function notifyModalHtml(cfg) {
     field('年费提前提醒天数（逗号分隔）', '<input id="n-feeDays" value="' + esc((cfg.rules.feeDays || []).join(',')) + '" placeholder="30,7,1">') +
     field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +
     field('月任务月末提醒天数（0=关闭）', '<input id="n-taskDays" type="number" min="0" value="' + esc(cfg.rules.taskRemainDays) + '">') +
+    field('账单到期提前天数', '<input id="n-billDays" type="number" min="0" value="' + esc(cfg.rules.billBeforeDays) + '">') +
     field('检查间隔（分钟，最小 5）', '<input id="n-interval" type="number" min="5" value="' + esc(cfg.intervalMinutes) + '">') +
+    '<div class="field full"><label>账单已过到期日仍未还时提醒</label><select id="n-billOverdue"><option value="1"' + (cfg.rules.billOverdueRemind ? ' selected' : '') + '>开启</option><option value="0"' + (!cfg.rules.billOverdueRemind ? ' selected' : '') + '>关闭</option></select></div>' +
     '</div></div>' +
     '<div id="n-result" class="notify-result"></div>' +
     (cfg.history && cfg.history.length ? '<div class="notify-rules"><h4>最近推送记录</h4>' +
@@ -470,6 +534,8 @@ async function openNotifyModal() {
       feeDays: String($n('n-feeDays').value).split(/[,，\s]+/).map(Number).filter((x) => isFinite(x) && x >= 0),
       repayBeforeDays: Number($n('n-repayDays').value) || 0,
       taskRemainDays: Number($n('n-taskDays').value) || 0,
+      billBeforeDays: Number($n('n-billDays').value) || 0,
+      billOverdueRemind: ($n('n-billOverdue') && $n('n-billOverdue').value === '1') ? 1 : 0,
     },
   });
 
@@ -576,10 +642,13 @@ function drawerHtml(m) {
     infoItem('授信额度', fmtMoney(m.creditLimit)) +
     infoItem('卡号后四位', m.last4 ? '**** ' + esc(m.last4) : '未填写') +
     infoItem('账单日', '每月 ' + m.billingDay + ' 日') +
-    infoItem('还款日', '每月 ' + m.repaymentDay + ' 日') +
-    infoItem('年费收取', '每年 ' + m.feeMonth + ' 月 ' + m.feeDay + ' 日') +
-    infoItem('年费金额', m.annualFee ? fmtMoney(m.annualFee) : '免年费') +
+    infoItem('还款方式', m.repayMode === 'afterBill' ? '账单日后 ' + (m.repayValue || 0) + ' 天' : '每月 ' + (m.repayValue || m.repaymentDay || '—') + ' 日') +
+    infoItem('宽限期', (m.graceDays || 0) + ' 天') +
+    infoItem('最长免息期', (m.payment && m.payment.maxInterestDays) ? m.payment.maxInterestDays + ' 天' : '—') +
     '</div>' +
+    '<div class="bill-hint">本期账单 ' + esc((m.payment && m.payment.billDate) || '—') + ' · 银行到期 ' + esc((m.payment && m.payment.dueDate) || '—') +
+    ((m.payment && m.payment.isInGrace) ? ' <span class="badge badge-yellow">宽限期内</span>' : '') +
+    ' · 建议消费日 ' + esc((m.payment && m.payment.bestSpendDate) || '—') + '（免息最长）</div>' +
     '<div style="margin-top:10px;display:flex;gap:8px">' +
     '<button class="btn small" data-act="edit-mycard">编辑持卡</button>' +
     '<button class="btn small danger" data-act="del-mycard">删除持卡</button>' +
@@ -596,7 +665,10 @@ function drawerHtml(m) {
     '<div class="info-grid">' +
     infoItem('下期年费日', m.nextFeeDate) +
     infoItem('年费倒计时', m.waiver.needsPayment ? '<span class="badge ' + (FEE_BADGE[m.feeDaysColor] || 'badge-default') + '">年费还有 ' + m.feeDays + ' 天</span>' : '<span class="badge badge-green">年费已免</span>') +
+    infoItem('达标状态', m.feeStatus ? '<span class="badge ' + (m.feeStatus === '未达标' ? 'badge-default' : 'badge-green') + '">' + esc(m.feeStatus) + '</span>' : '—') +
+    infoItem('年费预警', m.feeAlert ? '<span class="badge ' + (FEE_ALERT_BADGE[m.feeAlert] || 'badge-default') + '">' + esc(m.feeAlert) + '</span>' : '—') +
     '</div>' +
+    (m.feeMonthsLeft != null ? '<div class="bill-hint">距年费约 ' + m.feeMonthsLeft + ' 个月</div>' : '') +
     '<div style="margin-top:10px">' + feePolicyHtml + '</div></div>' +
 
     '<div class="drawer-section"><h3>消费记录</h3>' +
@@ -616,6 +688,14 @@ function drawerHtml(m) {
       : '<div style="font-size:13px;color:var(--text-3)">暂无消费记录</div>') +
     '</div>' +
 
+    '<div class="drawer-section"><h3>账单流水</h3>' +
+    '<div class="chip-row" style="margin-top:0">' +
+    '<button class="btn small primary" data-act="bill-add">新增账单</button>' +
+    '<button class="btn small" data-act="bill-gen">生成本期账单</button>' +
+    '<span class="stat-chip">未还 <b>' + unpaidCount(m) + '</b> 笔</span>' +
+    '</div>' +
+    billsHtml(m) + '</div>' +
+
     '<div class="drawer-section"><h3>权益使用明细</h3>' +
     (benefitsHtml || '<div style="font-size:13px;color:var(--text-3)">暂无权益（编辑持卡可添加）</div>') +
     '</div>' +
@@ -627,6 +707,58 @@ function infoItem(k, v) {
   return '<div class="info-item"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
 }
 
+function myBills(m) {
+  return (state.bills || []).filter((b) => b.myCardId === m.id).sort((a, b) => (a.month < b.month ? 1 : -1));
+}
+
+function unpaidCount(m) {
+  return myBills(m).filter((b) => b.paid !== '已还').length;
+}
+
+function billsHtml(m) {
+  const list = myBills(m);
+  if (!list.length) return '<div style="font-size:13px;color:var(--text-3)">暂无账单记录（点「生成本期账单」快速创建）</div>';
+  return '<table class="record-table"><thead><tr><th>月份</th><th>金额</th><th>到期日</th><th>状态</th><th>操作</th></tr></thead><tbody>' +
+    list.map((b) => '<tr data-bill-id="' + b.id + '">' +
+      '<td>' + esc(b.month) + '</td>' +
+      '<td class="amount">' + fmtMoney(b.amount) + '</td>' +
+      '<td>' + esc(b.dueDate || '—') + '</td>' +
+      '<td><span class="badge ' + (b.paid === '已还' ? 'badge-green' : 'badge-red') + '">' + esc(b.paid) + '</span>' +
+      (b.paidDate ? '<div class="slider-date">' + esc(b.paidDate) + '</div>' : '') + '</td>' +
+      '<td><button class="btn small" data-act="bill-toggle">' + (b.paid === '已还' ? '标记未还' : '标记已还') + '</button> ' +
+      '<button class="btn small danger" data-act="bill-del">删除</button></td></tr>').join('') +
+    '</tbody></table>';
+}
+
+async function openBillModal(m) {
+  const p = m.payment || {};
+  openModal('<div class="modal-title">新增账单 — ' + esc(m.alias || m.name) + '</div>',
+    '<div class="form-grid">' +
+    field('出账月份（YYYY-MM）', '<input id="b-month" value="' + esc(p.billMonth || '') + '" placeholder="2026-10">') +
+    field('账单金额', '<input id="b-amount" type="number" min="0" step="0.01" value="0">') +
+    field('到期还款日', '<input id="b-due" type="date" value="' + esc(p.dueDate || '') + '">') +
+    field('是否已还', '<select id="b-paid"><option>未还</option><option>已还</option></select>') +
+    '</div>',
+    '<button class="btn" data-close>取消</button><button class="btn primary" id="b-save">保存</button>');
+  $('#b-save').addEventListener('click', async () => {
+    try {
+      await api('/api/bills', {
+        method: 'POST',
+        body: {
+          myCardId: m.id,
+          month: $('#b-month').value.trim(),
+          amount: $('#b-amount').value,
+          dueDate: $('#b-due').value,
+          paid: $('#b-paid').value,
+        },
+      });
+      toast('账单已添加');
+      closeModal();
+      await loadAll();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
 function sliderHtml(act, on, label, date, id) {
   return '<button class="slider-toggle' + (on ? ' on' : '') + '" data-act="' + act + '" data-id="' + id + '">' +
     '<span class="slider-track"><span class="slider-knob"></span></span>' +
@@ -636,11 +768,18 @@ function sliderHtml(act, on, label, date, id) {
 
 function benefitBlockHtml(m, b, i) {
   const badgeCls = CYCLE_BADGE[b.resetCycle] || 'badge-default';
+  const unlimited = b.total < 0;
   const pct = b.total > 0 ? Math.min(100, Math.round((b.used / b.total) * 100)) : 0;
+  const countTxt = unlimited ? '已用 ' + b.used + ' / 不限' : '已用 ' + b.used + ' / ' + b.total;
+  const stateBadge = b.expired ? '<span class="badge badge-default">已过期</span>'
+    : (unlimited ? '<span class="badge badge-green">不限次</span>'
+      : '<span class="badge ' + (b.used >= b.total ? 'badge-red' : 'badge-default') + '">' + (b.remaining != null ? '剩 ' + b.remaining : countTxt) + '</span>');
   return '<div class="benefit-block" data-idx="' + i + '">' +
     '<div class="b-head"><span class="b-name">' + esc(b.name) + '</span>' +
+    (b.type ? '<span class="badge badge-blue">' + esc(b.type) + '</span>' : '') +
     '<span class="badge ' + badgeCls + '">' + esc(b.resetCycle) + '重置</span>' +
-    '<span class="badge ' + (b.used >= b.total ? 'badge-red' : 'badge-default') + '">已用 ' + b.used + ' / ' + b.total + '</span></div>' +
+    '<span class="badge badge-default">' + countTxt + '</span>' + stateBadge +
+    (b.validUntil ? '<span class="slider-date">有效期至 ' + esc(b.validUntil) + '</span>' : '') + '</div>' +
     '<div class="progress"><div class="progress-track"><div class="progress-fill' + (b.used >= b.total ? ' done' : '') + '" style="width:' + pct + '%"></div></div></div>' +
     '<div class="b-actions">' +
     '<button class="btn small" data-act="record-benefit">记一笔</button>' +
@@ -688,6 +827,40 @@ function bindDrawerEvents(m) {
   });
   $$('[data-act="detail-records"]', drawer).forEach((btn) => {
     btn.addEventListener('click', () => openRecordsModal(m, btn.dataset.scope));
+  });
+
+  // 账单流水
+  const billAdd = $('[data-act="bill-add"]', drawer);
+  if (billAdd) billAdd.addEventListener('click', () => openBillModal(m));
+  const billGen = $('[data-act="bill-gen"]', drawer);
+  if (billGen) billGen.addEventListener('click', async () => {
+    try {
+      await api('/api/mycards/' + m.id + '/bills/generate', { method: 'POST', body: {} });
+      toast('已生成本期账单');
+      await loadAll();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+  $$('[data-act="bill-toggle"]', drawer).forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.closest('tr').dataset.billId;
+      const b = (state.bills || []).find((x) => x.id === id);
+      if (!b) return;
+      try {
+        await api('/api/bills/' + id, { method: 'PUT', body: { paid: b.paid === '已还' ? '未还' : '已还' } });
+        await loadAll();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  });
+  $$('[data-act="bill-del"]', drawer).forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.closest('tr').dataset.billId;
+      if (!(await confirmDialog('确定删除这条账单记录？'))) return;
+      try {
+        await api('/api/bills/' + id, { method: 'DELETE' });
+        toast('已删除');
+        await loadAll();
+      } catch (e) { toast(e.message, 'error'); }
+    });
   });
 
   // 权益
@@ -812,9 +985,14 @@ function myCardFormHtml(c, m) {
     field('授信额度', '<input id="f-credit" type="number" min="0" step="1000" value="' + (m ? m.creditLimit : (c.startCredit || 0)) + '">') +
     field('月消费目标（选填）', '<input id="f-target" type="number" min="0" step="1000" value="' + (m ? m.monthlySpendTarget : 0) + '">') +
     field('账单日（1-31）', '<input id="f-billing" type="number" min="1" max="31" value="' + (m ? m.billingDay : 1) + '">') +
-    field('还款日（1-31）', '<input id="f-repay" type="number" min="1" max="31" value="' + (m ? m.repaymentDay : 20) + '">') +
+    field('还款方式', '<select id="f-repaymode"><option value="fixed"' + (!m || m.repayMode !== 'afterBill' ? ' selected' : '') + '>每月固定日</option><option value="afterBill"' + (m && m.repayMode === 'afterBill' ? ' selected' : '') + '>账单日后 N 天</option></select>') +
+    field('还款值', '<input id="f-repay" type="number" min="1" max="365" value="' + (m ? (m.repayValue != null ? m.repayValue : m.repaymentDay) : 20) + '" title="固定日=第几日；账单日后N天=天数">') +
+    field('宽限期（天）', '<input id="f-grace" type="number" min="0" max="30" value="' + (m ? (m.graceDays || 0) : 3) + '">') +
+    field('最长免息期（天，选填）', '<input id="f-interest" type="number" min="0" max="120" value="' + (m ? (m.maxInterestDays || 0) : 0) + '">') +
     field('年费收取月（1-12）', '<input id="f-feemonth" type="number" min="1" max="12" value="' + (m ? m.feeMonth : 1) + '">') +
     field('年费收取日（1-31）', '<input id="f-feeday" type="number" min="1" max="31" value="' + (m ? m.feeDay : 1) + '">') +
+    field('已达标年份（手工，选填）', '<input id="f-waivedyear" type="number" min="0" value="' + (m ? (m.waivedYear || 0) : 0) + '" title="填当前年份表示手工声明本年已达标/已减免">') +
+    field('已刷核定期（选填）', '<input id="f-countperiod" type="number" min="0" value="' + (m ? (m.countPeriodYear || 0) : 0) + '" title="填年份表示已刷数据统计到该年，跨年后自动失效">') +
     '</div>' +
     '<div style="margin-top:12px"><label style="font-size:12px;color:var(--text-2)">权益（名称 / 总次数 / 重置周期）</label>' +
     '<div id="benefit-rows">' + bens.map((b, i) => benefitEditRow(b, i)).join('') + '</div>' +
@@ -823,11 +1001,15 @@ function myCardFormHtml(c, m) {
 }
 
 function benefitEditRow(b, i) {
-  const cycles = state.meta.resetCycles || ['自然月', '自然年', '年费日'];
+  const cycles = state.meta.resetCycles || [];
+  const types = state.meta.benefitTypes || [];
   return '<div class="benefit-row" data-i="' + i + '">' +
     '<input class="b-name" placeholder="权益名称" value="' + esc(b.name) + '">' +
-    '<input class="b-total" type="number" min="0" placeholder="次数" value="' + b.total + '">' +
+    '<select class="b-type"><option value="">类型（选填）</option>' +
+    types.map((t) => '<option' + (t === (b.type || b.benefitType) ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>' +
+    '<input class="b-total" type="number" min="-1" placeholder="次数" title="-1 = 不限次" value="' + (b.total == null ? 1 : b.total) + '">' +
     '<select class="b-cycle">' + cycles.map((c2) => '<option' + (c2 === b.resetCycle ? ' selected' : '') + '>' + c2 + '</option>').join('') + '</select>' +
+    '<input class="b-until" type="date" title="有效期至（选填）" value="' + esc(b.validUntil || '') + '">' +
     '<button class="remove-btn" title="删除">✕</button></div>';
 }
 
@@ -847,11 +1029,17 @@ function bindRemoveButtons(form) {
 }
 
 function collectBenefits(form) {
-  return $$('.benefit-row', form).map((row) => ({
-    name: $('.b-name', row).value.trim(),
-    total: Math.max(0, parseInt($('.b-total', row).value, 10) || 0),
-    resetCycle: $('.b-cycle', row).value,
-  })).filter((b) => b.name);
+  return $$('.benefit-row', form).map((row) => {
+    const raw = parseInt($('.b-total', row).value, 10);
+    const total = isNaN(raw) ? 1 : (raw < 0 ? -1 : raw); // -1 = 不限次
+    return {
+      name: $('.b-name', row).value.trim(),
+      type: ($('.b-type', row) && $('.b-type', row).value) || '',
+      total,
+      resetCycle: $('.b-cycle', row).value,
+      validUntil: ($('.b-until', row) && $('.b-until', row).value) || '',
+    };
+  }).filter((b) => b.name);
 }
 
 async function saveMyCard(selected, editing) {
@@ -863,8 +1051,14 @@ async function saveMyCard(selected, editing) {
     monthlySpendTarget: $('#f-target', form).value,
     billingDay: $('#f-billing', form).value,
     repaymentDay: $('#f-repay', form).value,
+    repayMode: ($('#f-repaymode', form) && $('#f-repaymode', form).value) || 'fixed',
+    repayValue: $('#f-repay', form).value,
+    graceDays: ($('#f-grace', form) && $('#f-grace', form).value) || 0,
+    maxInterestDays: ($('#f-interest', form) && $('#f-interest', form).value) || 0,
     feeMonth: $('#f-feemonth', form).value,
     feeDay: $('#f-feeday', form).value,
+    waivedYear: ($('#f-waivedyear', form) && $('#f-waivedyear', form).value) || 0,
+    countPeriodYear: ($('#f-countperiod', form) && $('#f-countperiod', form).value) || 0,
     benefits: collectBenefits(form),
   };
   try {

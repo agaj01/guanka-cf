@@ -78,10 +78,11 @@ function cardYearStart(feeMonth, feeDay, now) {
   return d;
 }
 
-// 权益周期起点
+// 权益周期起点（一次性/无固定：不重置，起点取纪元）
 function cycleStart(resetCycle, feeMonth, feeDay, now) {
   if (resetCycle === '自然月') return new Date(now.getFullYear(), now.getMonth(), 1);
   if (resetCycle === '自然年') return new Date(now.getFullYear(), 0, 1);
+  if (resetCycle === '一次性' || resetCycle === '无固定') return new Date(1970, 0, 1);
   return cardYearStart(feeMonth, feeDay, now); // 年费日重置
 }
 
@@ -89,6 +90,7 @@ function cycleStart(resetCycle, feeMonth, feeDay, now) {
 function cycleKeyOf(resetCycle, feeMonth, feeDay, dateStr) {
   if (resetCycle === '自然月') return dateStr.slice(0, 7);
   if (resetCycle === '自然年') return dateStr.slice(0, 4);
+  if (resetCycle === '一次性' || resetCycle === '无固定') return resetCycle;
   const md = pad2(feeMonth) + '-' + pad2(feeDay);
   const y = +dateStr.slice(0, 4);
   return (dateStr.slice(5) >= md ? y : y - 1) + '-' + md + ' 起';

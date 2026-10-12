@@ -26,7 +26,7 @@ const DEFAULT_CONFIG = {
     serverchan: { enabled: false, sendkey: '' },
     bark: { enabled: false, deviceKey: '', server: 'https://api.day.app', level: 'active', group: '管卡' },
   },
-  rules: { feeDays: [30, 7, 1], repayBeforeDays: 3, taskRemainDays: 3 },
+  rules: { feeDays: [30, 7, 1], repayBeforeDays: 3, taskRemainDays: 3, billBeforeDays: 3, billOverdueRemind: 1 },
   sentLog: {},
   history: [],
 };
@@ -49,8 +49,10 @@ function normalizeConfig(raw) {
   if (r.rules) {
     const days = Array.isArray(r.rules.feeDays) ? r.rules.feeDays.map(Number).filter((n) => Number.isFinite(n) && n >= 0) : null;
     cfg.rules.feeDays = days && days.length ? days.slice().sort((a, b) => b - a) : DEFAULT_CONFIG.rules.feeDays.slice();
-    cfg.rules.repayBeforeDays = Math.max(0, Number(r.rules.repayBeforeDays) || 0);
-    cfg.rules.taskRemainDays = Math.max(0, Number(r.rules.taskRemainDays) || 0);
+    cfg.rules.repayBeforeDays = Number(r.rules.repayBeforeDays) || 0;
+    cfg.rules.taskRemainDays = Number(r.rules.taskRemainDays) || 0;
+    cfg.rules.billBeforeDays = r.rules.billBeforeDays == null ? DEFAULT_CONFIG.rules.billBeforeDays : (Number(r.rules.billBeforeDays) || 0);
+    cfg.rules.billOverdueRemind = r.rules.billOverdueRemind == null ? 1 : (r.rules.billOverdueRemind ? 1 : 0);
   }
   cfg.sentLog = (r.sentLog && typeof r.sentLog === 'object') ? r.sentLog : {};
   cfg.history = Array.isArray(r.history) ? r.history.slice(0, 30) : [];
@@ -135,8 +137,22 @@ function taskItem(m, remainDays, gap) {
   return { type: 'task', key: `task:${m.id}:${todayStr().slice(0, 7)}`, title, body };
 }
 
-/** 收集所有待提醒项（不含去重判断） */
-function collectReminders(cards, cfg, now) {
+function billItem(b, m, daysLeft) {
+  const name = (m && (m.alias || m.name)) || '未命名卡片';
+  const title = daysLeft < 0 ? `账单逾期未还：${name}（${b.month}）` : `账单提醒：${name} ${daysLeft === 0 ? '今日到期' : `还有 ${daysLeft} 天`}`;
+  const body = [
+    `- 银行：${(m && m.bank) || '—'}`,
+    `- 卡片：${(m && m.name) || '—'}${(m && m.alias) ? `（${m.alias}）` : ''}`,
+    `- 出账月份：${b.month}`,
+    `- 账单金额：¥${money(b.amount)}`,
+    `- 到期还款日：${b.dueDate}${daysLeft < 0 ? `（已逾期 ${Math.abs(daysLeft)} 天）` : ''}`,
+    daysLeft < 0 ? '- 状态：**仍未标记为已还**，请尽快处理' : '- 状态：未还',
+  ].join('\n');
+  return { type: 'bill', key: `bill:${b.myCardId}:${b.month}:${daysLeft < 0 ? 'overdue' : 'due'}`, title, body };
+}
+
+/** 收集所有待提醒项（不含去重判断）。bills 为账单流水（月账单 + 是否已还） */
+function collectReminders(cards, cfg, now, bills) {
   now = now || new Date();
   const items = [];
   const monthKey = todayStr(now).slice(0, 7);
@@ -159,14 +175,28 @@ function collectReminders(cards, cfg, now) {
       if (gap > 0 && remainDaysInMonth <= cfg.rules.taskRemainDays) items.push(taskItem(m, remainDaysInMonth, gap));
     }
   }
+  // ④ 账单流水：未还账单到期前提醒 + 已过到期日仍未还的逾期提醒
+  const byId = new Map((cards || []).map((m) => [m.id, m]));
+  for (const b of bills || []) {
+    if (b.paid === '已还' || !b.dueDate) continue;
+    const target = new Date(b.dueDate + 'T00:00:00');
+    if (isNaN(target.getTime())) continue;
+    const t0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const daysLeft = Math.round((target - t0) / 86400000);
+    if (daysLeft < 0) {
+      if (cfg.rules.billOverdueRemind) items.push(billItem(b, byId.get(b.myCardId), daysLeft));
+    } else if (daysLeft <= cfg.rules.billBeforeDays) {
+      items.push(billItem(b, byId.get(b.myCardId), daysLeft));
+    }
+  }
   return items;
 }
 
 /** 执行检查并推送：去重（同一 key 只推一次）→ 发送 → 记录历史 */
-async function runChecks(cards, cfg, notifier, now) {
+async function runChecks(cards, cfg, notifier, now, bills) {
   now = now || new Date();
   const date = todayStr(now);
-  const items = collectReminders(cards, cfg, now);
+  const items = collectReminders(cards, cfg, now, bills);
   const pending = items.filter((it) => !cfg.sentLog[it.key]);
   const results = [];
   for (const it of pending) {

@@ -5,11 +5,32 @@ const U = require('./util');
 const { SEED_CARDS, SEED_VERSION } = require('./seed');
 const notifier = require('./notifier');
 const reminder = require('./reminder');
+const D = require('./dates');
+
+// 账单流水（月账单 + 是否已还）
+function getBills() { return store.read('bills', []); }
+
+// 年费达标状态（金山口径：无年费 / 手工声明 / 自动判定）
+function feeStatusOf(mc, now) {
+  const year = now.getFullYear();
+  if (!(Number(mc.annualFee) > 0)) return '无年费';
+  if (Number(mc.waivedYear) >= year && Number(mc.waivedYear) > 0) return '已达标(手工)';
+  const w = mc.waiver || {};
+  // 已刷核定期：填了往年 → 跨年后已刷数据自动失效
+  const periodOk = !Number(mc.countPeriodYear) || Number(mc.countPeriodYear) >= year;
+  let autoMet = false;
+  if (w.kind === '免年费') autoMet = true;
+  else if (w.kind === '刚性') autoMet = false;
+  else autoMet = !!w.met; // 消费/笔数刷免 按进度；积分抵扣/资产存免 按开关
+  return (periodOk && autoMet) ? '已达标(自动)' : '未达标';
+}
 
 const CARD_FIELDS = ['bank', 'name', 'level', 'org', 'annualFee', 'waiverType', 'waiverCondition', 'waiverPolicy', 'startCredit', 'benefits', 'applyCondition', 'note'];
 const CSV_HEADER = ['银行', '卡片名称', '卡等级', '卡组织', '年费', '免年费类型', '刷免条件', '免年费政策', '起批额度', '主要权益', '申请条件', '备注'];
 const WAIVER_TYPES = ['消费刷免', '笔数刷免', '积分抵扣', '资产存免', '刚性', '免年费'];
-const RESET_CYCLES = ['自然月', '自然年', '年费日'];
+const RESET_CYCLES = ['自然月', '自然年', '年费日', '一次性', '无固定'];
+// 权益类型（对齐金山文档权益台账的标准化取值）
+const BENEFIT_TYPES = ['境内接送机', '境外接送机', '境内机场贵宾楼', '机场龙腾悦途PP', '机场龙腾悦途PP（可餐食）', '代驾', '租车', '道路救援', '体检', '洗牙', '挂号', '挂号+导诊', '酒店优惠', '运动健身', '延误险', '积分兑换里程', '其他'];
 const CHANNELS = ['微信支付', '支付宝支付', '云闪付线上', '云闪付线下', 'ApplePay', '其他手机Pay', '美团支付', '抖音支付', '京东支付', '程支付', '多多支付', 'POS机刷卡'];
 const CATEGORIES = ['餐饮', '购物', '交通', '加油', '超市', '旅行', '娱乐', '医疗', '教育', '其他'];
 
@@ -157,13 +178,29 @@ function computeMyCard(mc, now, idx) {
   const ws = waiverState(mc, now, recs);
   const benefits = (mc.benefits || []).map((b, i) => {
     const u = benefitUsed(mc, i, now, idx);
-    return { ...b, used: u.used, exhausted: u.exhausted };
+    // 展开全部使用态：used / remaining / unlimited / expired / exhausted
+    return { ...b, ...u };
   });
   const monthSpend = recs.amount.filter((r) => r.date >= monthStart).reduce((s, r) => s + (Number(r.amount) || 0), 0);
   const yearSpend = recs.amount.filter((r) => r.date >= yearStart).reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  // 还款信息（宽限期 + 两种还款方式）与预警分级
+  const payment = D.paymentInfo(mc, now);
+  const feeStatus = feeStatusOf(mc, now);
+  const feeWaived = feeStatus !== '未达标';
+  // 注意：nextFeeDate 是计算字段，必须先算出来再用于「距年费月数」
+  const nextFeeDateStr = U.toDateStr(U.nextFeeDate(mc.feeMonth, mc.feeDay, now));
+  const nextFee = new Date(nextFeeDateStr + 'T00:00:00');
+  const feeMonthsLeft = isNaN(nextFee.getTime())
+    ? null
+    : (nextFee.getFullYear() - now.getFullYear()) * 12 + (nextFee.getMonth() - now.getMonth());
+  const feeDaysLeft = mc.feeDays;
   return {
     ...mc,
     benefits,
+    payment,
+    feeStatus,
+    feeAlert: D.feeAlertOf(mc, feeDaysLeft, feeWaived),
+    feeMonthsLeft,
     recent: recs.amount.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 5),
     monthSpend, yearSpend, totalSpend: recs.amount.reduce((s, r) => s + (Number(r.amount) || 0), 0),
     monthCount: recs.amount.filter((r) => r.date >= monthStart).length,
@@ -172,7 +209,7 @@ function computeMyCard(mc, now, idx) {
     monthProgress: mc.monthlySpendTarget > 0 ? Math.min(100, Math.round((monthSpend / mc.monthlySpendTarget) * 100)) : 0,
     feeDays: days,
     feeDaysColor: feeDaysColor(days, ws.needsPayment),
-    nextFeeDate: U.toDateStr(U.nextFeeDate(mc.feeMonth, mc.feeDay, now)),
+    nextFeeDate: nextFeeDateStr,
     waiver: ws,
   };
 }
@@ -230,7 +267,19 @@ function benefitUsed(mc, idx, now, index) {
   const recs = (index ? benefitRecords(index, mc.id, idx) : benefitUsage(mc.id, idx)).filter((r) => r.date >= startStr);
   const used = recs.filter((r) => r.type === 'usage').length
     + recs.filter((r) => r.type === 'count').reduce((s, r) => s + (Number(r.count) || 0), 0);
-  return { used, total: Number(b.total) || 0, exhausted: used >= (Number(b.total) || 0), cycle: b.resetCycle, cycleStart: startStr };
+  const total = Number(b.total) || 0;
+  const unlimited = total < 0;
+  const expired = !!(b.validUntil && b.validUntil < U.todayStr());
+  return {
+    used,
+    total,
+    unlimited,
+    expired,
+    remaining: unlimited ? null : Math.max(0, total - used),
+    exhausted: !unlimited && !expired && used >= total,
+    cycle: b.resetCycle,
+    cycleStart: startStr,
+  };
 }
 
 function benefitHistory(mc, idx) {
@@ -285,6 +334,11 @@ function matchRoute(method, pathname) {
     ['POST', /^\/api\/notify\/test$/],
     ['POST', /^\/api\/notify\/check$/],
     ['GET', /^\/api\/notify\/history$/],
+    ['GET', /^\/api\/bills$/],
+    ['POST', /^\/api\/bills$/],
+    ['PUT', /^\/api\/bills\/([^/]+)$/],
+    ['DELETE', /^\/api\/bills\/([^/]+)$/],
+    ['POST', /^\/api\/mycards\/([^/]+)\/bills\/generate$/],
     ['POST', /^\/api\/shutdown$/],
   ];
   for (const [m, re] of routes) {
@@ -302,7 +356,7 @@ async function handle(method, pathname, url, body) {
 
   // ---- 基础 ----
   if (pathname === '/api/health') return json({ ok: true, version: '1.0.0', time: now.toISOString() });
-  if (pathname === '/api/meta') return json({ channels: CHANNELS, categories: CATEGORIES, waiverTypes: WAIVER_TYPES, resetCycles: RESET_CYCLES, csvHeader: CSV_HEADER });
+  if (pathname === '/api/meta') return json({ channels: CHANNELS, categories: CATEGORIES, waiverTypes: WAIVER_TYPES, resetCycles: RESET_CYCLES, benefitTypes: BENEFIT_TYPES, csvHeader: CSV_HEADER });
   if (pathname === '/api/shutdown') return { shutdown: true };
 
   // ---- 设置 ----
@@ -408,6 +462,11 @@ async function handle(method, pathname, url, body) {
     const card = getCards().find((c) => c.id === b.cardId);
     if (!card) return err('卡种不存在', 404);
     const fee = U.clampFeeDate(b.feeMonth, b.feeDay);
+    // 还款方式：fixed=每月固定日 / afterBill=账单日后 N 天（老数据 repaymentDay 自动迁移为 fixed）
+    const repayMode = b.repayMode === 'afterBill' ? 'afterBill' : 'fixed';
+    const repayValue = b.repayValue != null
+      ? Math.max(0, Math.min(365, Math.round(Number(b.repayValue) || 0)))
+      : clampDay(b.repaymentDay, 20);
     const mc = {
       id: U.uid(),
       cardId: card.id,
@@ -416,7 +475,13 @@ async function handle(method, pathname, url, body) {
       alias: String(b.alias || '').trim(),
       creditLimit: nonNeg(b.creditLimit, card.startCredit),
       billingDay: clampDay(b.billingDay, 1),
-      repaymentDay: clampDay(b.repaymentDay, 20),
+      repaymentDay: repayMode === 'fixed' ? Math.min(31, Math.max(1, repayValue || 20)) : clampDay(b.repaymentDay, 20),
+      repayMode,
+      repayValue,
+      graceDays: b.graceDays != null ? Math.max(0, Math.min(30, Math.round(Number(b.graceDays) || 0))) : 3,
+      waivedYear: Math.max(0, Math.round(Number(b.waivedYear) || 0)),
+      countPeriodYear: Math.max(0, Math.round(Number(b.countPeriodYear) || 0)),
+      maxInterestDays: Math.max(0, Math.min(120, Math.round(Number(b.maxInterestDays) || 0))),
       feeMonth: fee.m,
       feeDay: fee.d,
       last4: String(b.last4 || '').replace(/\D/g, '').slice(0, 4),
@@ -441,12 +506,22 @@ async function handle(method, pathname, url, body) {
     const fee = (b.feeMonth != null || b.feeDay != null)
       ? U.clampFeeDate(b.feeMonth != null ? b.feeMonth : cur.feeMonth, b.feeDay != null ? b.feeDay : cur.feeDay)
       : { m: cur.feeMonth, d: cur.feeDay };
+    const repayMode = b.repayMode === 'afterBill' ? 'afterBill' : (b.repayMode === 'fixed' ? 'fixed' : (cur.repayMode || 'fixed'));
+    const repayValue = b.repayValue != null
+      ? Math.max(0, Math.min(365, Math.round(Number(b.repayValue) || 0)))
+      : (b.repaymentDay != null ? clampDay(b.repaymentDay, 20) : (cur.repayValue != null ? cur.repayValue : cur.repaymentDay || 20));
     const updated = {
       ...cur,
       alias: String(b.alias != null ? b.alias : cur.alias).trim(),
       creditLimit: b.creditLimit != null ? nonNeg(b.creditLimit, 0) : cur.creditLimit,
       billingDay: b.billingDay != null ? clampDay(b.billingDay, 1) : cur.billingDay,
-      repaymentDay: b.repaymentDay != null ? clampDay(b.repaymentDay, 20) : cur.repaymentDay,
+      repayMode,
+      repayValue,
+      repaymentDay: repayMode === 'fixed' ? Math.min(31, Math.max(1, repayValue || 20)) : cur.repaymentDay,
+      graceDays: b.graceDays != null ? Math.max(0, Math.min(30, Math.round(Number(b.graceDays) || 0))) : (cur.graceDays || 0),
+      waivedYear: b.waivedYear != null ? Math.max(0, Math.round(Number(b.waivedYear) || 0)) : (cur.waivedYear || 0),
+      countPeriodYear: b.countPeriodYear != null ? Math.max(0, Math.round(Number(b.countPeriodYear) || 0)) : (cur.countPeriodYear || 0),
+      maxInterestDays: b.maxInterestDays != null ? Math.max(0, Math.min(120, Math.round(Number(b.maxInterestDays) || 0))) : (cur.maxInterestDays || 0),
       feeMonth: fee.m,
       feeDay: fee.d,
       last4: b.last4 != null ? String(b.last4).replace(/\D/g, '').slice(0, 4) : cur.last4,
@@ -567,6 +642,97 @@ async function handle(method, pathname, url, body) {
     store.write('benefits', recs);
     return json({ ok: true, used: st.used + count, total: st.total }, 201);
   }
+  // ---- 账单流水（月账单 + 是否已还）----
+  if (pathname === '/api/bills' && method === 'GET') {
+    const q = url.searchParams;
+    let list = getBills();
+    const cardId = q.get('myCardId');
+    const month = q.get('month');
+    const paid = q.get('paid');
+    if (cardId) list = list.filter((b) => b.myCardId === cardId);
+    if (month) list = list.filter((b) => b.month === month);
+    if (paid) list = list.filter((b) => b.paid === paid);
+    return json(list.sort((a, b) => (a.month < b.month ? 1 : -1)));
+  }
+  if (pathname === '/api/bills' && method === 'POST') {
+    const b = body || {};
+    if (!b.myCardId) return err('缺少 myCardId');
+    if (!getMyCards().some((m) => m.id === b.myCardId)) return err('持卡不存在', 404);
+    if (!/^\d{4}-\d{2}$/.test(String(b.month || ''))) return err('出账月份格式应为 YYYY-MM');
+    const amount = Number(b.amount);
+    if (!isFinite(amount) || amount < 0) return err('账单金额必须不小于 0');
+    const bills = getBills();
+    if (bills.some((x) => x.myCardId === b.myCardId && x.month === b.month)) {
+      return err('该卡该月份账单已存在');
+    }
+    const rec = {
+      id: U.uid(),
+      myCardId: b.myCardId,
+      month: String(b.month),
+      amount: Math.round(amount * 100) / 100,
+      dueDate: String(b.dueDate || ''),
+      paid: b.paid === '已还' ? '已还' : '未还',
+      paidDate: String(b.paidDate || ''),
+      note: String(b.note || '').trim(),
+      createdAt: now.toISOString(),
+    };
+    bills.push(rec);
+    store.write('bills', bills);
+    return json(rec, 201);
+  }
+  const billMatch = pathname.match(/^\/api\/bills\/([^/]+)$/);
+  if (billMatch && method === 'PUT') {
+    const bills = getBills();
+    const i = bills.findIndex((b) => b.id === billMatch[1]);
+    if (i < 0) return err('账单不存在', 404);
+    const b = body || {};
+    const cur = bills[i];
+    const amount = b.amount != null ? Number(b.amount) : cur.amount;
+    if (!isFinite(amount) || amount < 0) return err('账单金额必须不小于 0');
+    const paid = b.paid == null ? cur.paid : (b.paid === '已还' ? '已还' : '未还');
+    bills[i] = {
+      ...cur,
+      amount: Math.round(amount * 100) / 100,
+      dueDate: b.dueDate != null ? String(b.dueDate) : cur.dueDate,
+      paid,
+      // 标记已还且未填还款日期时自动填今天；改回未还则清空
+      paidDate: b.paidDate != null ? String(b.paidDate) : (paid === '已还' ? (cur.paidDate || U.todayStr()) : ''),
+      note: b.note != null ? String(b.note).trim() : cur.note,
+    };
+    store.write('bills', bills);
+    return json(bills[i]);
+  }
+  if (billMatch && method === 'DELETE') {
+    const bills = getBills();
+    if (!bills.some((b) => b.id === billMatch[1])) return err('账单不存在', 404);
+    store.write('bills', bills.filter((b) => b.id !== billMatch[1]));
+    return json({ ok: true });
+  }
+  const billGenMatch = pathname.match(/^\/api\/mycards\/([^/]+)\/bills\/generate$/);
+  if (billGenMatch && method === 'POST') {
+    const mc = getMyCards().find((m) => m.id === billGenMatch[1]);
+    if (!mc) return err('持卡不存在', 404);
+    const info = D.paymentInfo(mc, now);
+    const month = (body && /^\d{4}-\d{2}$/.test(String(body.month || ''))) ? String(body.month) : info.billMonth;
+    const bills = getBills();
+    const exist = bills.find((b) => b.myCardId === mc.id && b.month === month);
+    if (exist) return json(exist);
+    const rec = {
+      id: U.uid(),
+      myCardId: mc.id,
+      month,
+      amount: 0,
+      dueDate: info.dueDate,
+      paid: '未还',
+      paidDate: '',
+      note: '',
+      createdAt: now.toISOString(),
+    };
+    bills.push(rec);
+    store.write('bills', bills);
+    return json(rec, 201);
+  }
+
   // ---- 提醒功能 ----
   if (pathname === '/api/notify/config' && method === 'GET') {
     return json(reminder.normalizeConfig(store.read('notify', null)));
@@ -645,11 +811,19 @@ function validCount(v) {
 
 function normalizeBenefits(benefits, fallbackNames) {
   if (Array.isArray(benefits) && benefits.length) {
-    return benefits.map((b) => ({
-      name: String(b.name || '').trim() || '权益',
-      total: Math.max(0, Math.round(Number(b.total) || 0)),
-      resetCycle: RESET_CYCLES.includes(b.resetCycle) ? b.resetCycle : '自然年',
-    })).filter((b) => b.name);
+    return benefits.map((b) => {
+      const rawTotal = Math.round(Number(b.total));
+      const total = isFinite(rawTotal) ? (rawTotal < 0 ? -1 : rawTotal) : 1; // -1 = 不限次
+      const type = String(b.type || b.benefitType || '').trim();
+      const validUntil = U.parseDateStr(b.validUntil) ? String(b.validUntil) : '';
+      return {
+        name: String(b.name || '').trim() || '权益',
+        type: BENEFIT_TYPES.includes(type) ? type : (type || ''),
+        total,
+        resetCycle: RESET_CYCLES.includes(b.resetCycle) ? b.resetCycle : '自然年',
+        validUntil,
+      };
+    }).filter((b) => b.name);
   }
   // 未填写时按卡种权益默认：次数 1、自然年
   return (fallbackNames || []).map((name) => ({ name, total: 1, resetCycle: '自然年' }));
@@ -666,7 +840,7 @@ async function runNotifyChecks(force) {
   const idx = buildIndexes();
   const now = new Date();
   const cards = getMyCards().map((m) => computeMyCard(m, now, idx));
-  const out = await reminder.runChecks(cards, cfg, notifier, now);
+  const out = await reminder.runChecks(cards, cfg, notifier, now, getBills());
   cfg.lastCheckAt = now.toISOString();
   store.write('notify', cfg);
   return Object.assign({ skipped: false }, out);
