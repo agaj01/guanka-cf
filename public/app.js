@@ -118,6 +118,7 @@ function bindNav() {
     });
   });
   $('#theme-toggle').addEventListener('click', toggleTheme);
+  $('#btn-notify').addEventListener('click', openNotifyModal);
 }
 
 // ---------- 主题 ----------
@@ -413,6 +414,97 @@ function showFeeExpiring() {
   );
 }
 
+// ---------- 提醒设置 ----------
+function notifyModalHtml(cfg) {
+  const c = cfg.channels || {};
+  const ch = (key, label, desc, fields) =>
+    '<div class="notify-channel">' +
+    '<div class="nc-head"><label class="switch"><input type="checkbox" id="nc-' + key + '-enabled"' + (c[key] && c[key].enabled ? ' checked' : '') + '><b>' + label + '</b></label>' +
+    '<span class="nc-desc">' + desc + '</span></div>' +
+    '<div class="form-grid nc-body">' + fields.map((f) => field(f[1], '<input id="nc-' + key + '-' + f[0] + '"' + (f[2] === 'password' ? ' type="password"' : (f[2] === 'number' ? ' type="number"' : '')) + ' placeholder="' + esc(f[3] || '') + '" value="' + esc((c[key] && c[key][f[0]]) != null ? String(c[key][f[0]]) : '') + '">')).join('') + '</div></div>';
+
+  return (
+    '<label class="switch-row"><input type="checkbox" id="n-enabled"' + (cfg.enabled ? ' checked' : '') + '> <b>启用提醒</b>（容器常驻进程定时检查，无需 cron）</label>' +
+    ch('wxpusher', 'WxPusher', '微信推送：wxpusher 后台获取 appToken，UID 为接收用户',
+      [['appToken', 'appToken', 'password', 'AT_xxx'], ['uids', 'UID（多个用逗号分隔）', 'text', 'UID_xxx'], ['topicIds', '主题ID（可选）', 'text', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
+    ch('serverchan', 'Server酱³', '微信/多端推送：sct.ftqq.com 获取 SendKey（SCT/SCU 开头）',
+      [['sendkey', 'SendKey', 'password', 'SCTxxxxx']]) +
+    ch('bark', 'Bark', 'iOS 推送：Bark App 中复制 deviceKey（自建服务可改服务器地址）',
+      [['deviceKey', 'deviceKey', 'password', ''], ['server', '服务器地址', 'text', 'https://api.day.app'], ['level', '推送级别', 'text', 'active'], ['group', '分组', 'text', '管卡']]) +
+    '<div class="notify-rules"><h4>提醒规则</h4><div class="form-grid">' +
+    field('年费提前提醒天数（逗号分隔）', '<input id="n-feeDays" value="' + esc((cfg.rules.feeDays || []).join(',')) + '" placeholder="30,7,1">') +
+    field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +
+    field('月任务月末提醒天数（0=关闭）', '<input id="n-taskDays" type="number" min="0" value="' + esc(cfg.rules.taskRemainDays) + '">') +
+    field('检查间隔（分钟，最小 5）', '<input id="n-interval" type="number" min="5" value="' + esc(cfg.intervalMinutes) + '">') +
+    '</div></div>' +
+    '<div id="n-result" class="notify-result"></div>' +
+    (cfg.history && cfg.history.length ? '<div class="notify-rules"><h4>最近推送记录</h4>' +
+      cfg.history.slice(0, 8).map((h) => '<div class="nh-item"><span class="badge ' + (h.ok ? 'badge-green' : 'badge-red') + '">' + (h.ok ? '已推送' : '失败') + '</span>' +
+        '<span class="nh-title">' + esc(h.title) + '</span><span class="nh-time">' + esc(String(h.time).slice(0, 16).replace('T', ' ')) + '</span>' +
+        (h.channels || []).map((s2) => '<span class="nh-ch">' + esc(s2.label) + (s2.ok ? ' ✓' : ' ✗') + (s2.ok ? '' : ' ' + esc(s2.error)) + '</span>').join('') +
+        '</div>').join('') + '</div>' : '')
+  );
+}
+
+async function openNotifyModal() {
+  let cfg;
+  try {
+    cfg = await api('/api/notify/config');
+  } catch (e) { return toast(e.message, 'error'); }
+  openModal('<div class="modal-title">提醒设置</div>', notifyModalHtml(cfg),
+    '<button class="btn" data-close>关闭</button>' +
+    '<button class="btn" id="n-check">立即检查</button>' +
+    '<button class="btn" id="n-test">发送测试</button>' +
+    '<button class="btn primary" id="n-save">保存</button>');
+
+  const $n = (id) => document.getElementById(id);
+  const collect = () => ({
+    enabled: !!($n('n-enabled') && $n('n-enabled').checked),
+    intervalMinutes: Number($n('n-interval').value) || 60,
+    channels: {
+      wxpusher: { enabled: $n('nc-wxpusher-enabled').checked, appToken: $n('nc-wxpusher-appToken').value.trim(), uids: $n('nc-wxpusher-uids').value.trim(), topicIds: $n('nc-wxpusher-topicIds').value.trim(), summaryPrefix: $n('nc-wxpusher-summaryPrefix').value.trim() },
+      serverchan: { enabled: $n('nc-serverchan-enabled').checked, sendkey: $n('nc-serverchan-sendkey').value.trim() },
+      bark: { enabled: $n('nc-bark-enabled').checked, deviceKey: $n('nc-bark-deviceKey').value.trim(), server: $n('nc-bark-server').value.trim(), level: $n('nc-bark-level').value.trim(), group: $n('nc-bark-group').value.trim() },
+    },
+    rules: {
+      feeDays: String($n('n-feeDays').value).split(/[,，\s]+/).map(Number).filter((x) => isFinite(x) && x >= 0),
+      repayBeforeDays: Number($n('n-repayDays').value) || 0,
+      taskRemainDays: Number($n('n-taskDays').value) || 0,
+    },
+  });
+
+  const showResult = (html) => { const r = $n('n-result'); if (r) r.innerHTML = html; };
+
+  $n('n-save').addEventListener('click', async () => {
+    try {
+      await api('/api/notify/config', { method: 'PUT', body: collect() });
+      toast('提醒设置已保存');
+      showResult('<div class="badge badge-green">已保存</div>');
+    } catch (e) { showResult('<div class="badge badge-red">' + esc(e.message) + '</div>'); }
+  });
+
+  $n('n-test').addEventListener('click', async () => {
+    try {
+      await api('/api/notify/config', { method: 'PUT', body: collect() });
+      const r = await api('/api/notify/test', { method: 'POST', body: {} });
+      showResult('<div class="badge ' + (r.ok ? 'badge-green' : 'badge-red') + '">' + (r.ok ? '测试推送成功' : '测试推送失败') + '</div>' +
+        (r.results || []).map((s2) => '<div class="nh-item"><span class="badge ' + (s2.ok ? 'badge-green' : 'badge-red') + '">' + esc(s2.label) + '</span>' +
+          '<span class="nh-title">' + (s2.ok ? '发送成功' : esc(s2.error)) + '</span></div>').join(''));
+    } catch (e) { showResult('<div class="badge badge-red">' + esc(e.message) + '</div>'); }
+  });
+
+  $n('n-check').addEventListener('click', async () => {
+    try {
+      await api('/api/notify/config', { method: 'PUT', body: collect() });
+      const r = await api('/api/notify/check', { method: 'POST', body: {} });
+      if (r.skipped) { showResult('<div class="badge badge-yellow">' + esc(r.reason || '已跳过') + '</div>'); return; }
+      showResult('<div class="badge ' + (r.sent ? 'badge-green' : 'badge-default') + '">检查 ' + r.checked + ' 项，推送 ' + r.sent + ' 项</div>' +
+        (r.results || []).map((s2) => '<div class="nh-item"><span class="badge ' + (s2.ok ? 'badge-green' : 'badge-red') + '">' + esc(s2.type) + '</span>' +
+          '<span class="nh-title">' + esc(s2.title) + '</span>' + (s2.error ? '<span class="nh-time">' + esc(s2.error) + '</span>' : '') + '</div>').join(''));
+    } catch (e) { showResult('<div class="badge badge-red">' + esc(e.message) + '</div>'); }
+  });
+}
+
 // ---------- 抽屉：持卡详情 ----------
 function openDrawer(id) {
   state.drawerId = id;
@@ -641,7 +733,11 @@ function closeModal() {
   const wrap = $('#modal-wrap');
   if (!wrap) return;
   wrap.classList.remove('show');
-  setTimeout(() => { $('#modal-root').innerHTML = ''; }, 200);
+  // 延迟清理时必须确认仍是同一个弹窗，否则会把期间新开的弹窗误清空
+  const node = wrap;
+  setTimeout(() => {
+    if ($('#modal-wrap') === node) $('#modal-root').innerHTML = '';
+  }, 200);
 }
 
 // ---------- 弹窗：添加 / 编辑持卡 ----------

@@ -128,7 +128,24 @@ server.listen(PORT, HOST, () => {
   console.log('  访问地址: http://localhost:' + PORT);
   console.log('  数据目录: ' + DATA_DIR + '（卡种库 ' + cards.length + ' 张）');
   console.log('============================================');
+  startNotifyScheduler();
 });
+
+// 提醒调度：容器常驻进程每 10 分钟探测一次，实际检查间隔由 notify 配置决定
+function startNotifyScheduler() {
+  const tick = async () => {
+    try {
+      const out = await routes.runNotifyChecks(false);
+      if (out && !out.skipped && out.sent > 0) {
+        console.log('[管卡] 提醒检查完成：待提醒 %d 项，已推送 %d 项', out.checked || 0, out.sent || 0);
+      }
+    } catch (e) {
+      console.error('[管卡] 提醒检查失败:', e && e.message ? e.message : e);
+    }
+  };
+  setTimeout(tick, 15000); // 启动后先跑一次（首次 lastCheckAt 为空，会立即检查）
+  setInterval(tick, 10 * 60 * 1000).unref();
+}
 
 process.on('SIGTERM', () => { console.log('[管卡] 收到 SIGTERM，退出'); process.exit(0); });
 process.on('SIGINT', () => { console.log('[管卡] 收到 SIGINT，退出'); process.exit(0); });

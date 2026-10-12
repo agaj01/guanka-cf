@@ -60,6 +60,45 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 - 恢复：把备份解压到卷对应目录即可；或直接把宿主机目录挂载为卷：
   `docker run -v /your/data/dir:/app/data ...`（容器内以 node 用户运行，注意宿主机目录的读写权限）
 
+## 提醒功能（3 个通道）
+
+顶栏点击 🔔 打开「提醒设置」，可配置 **WxPusher / Server酱³ / Bark** 三个通道（可同时启用），
+容器常驻进程定时检查并推送，**不需要 cron**。
+
+**提醒类型**
+
+| 类型 | 触发条件 | 默认 |
+|------|---------|------|
+| 年费到期 | 需缴费（未达标/未抵扣/刚性）且剩余天数跨过 30/7/1 天阈值 | 每个阈值只推一次 |
+| 还款日 | 距下次还款日 ≤ N 天（自动跨月） | N=3 |
+| 月刷卡任务 | 月末最后 N 天仍未达标 | N=3 |
+
+**通道参数**
+
+| 通道 | 参数 | 获取方式 |
+|------|------|---------|
+| WxPusher | appToken、UID（多个逗号分隔）、主题ID（可选）、消息前缀 | wxpusher.zjiecode.com 后台 |
+| Server酱³ | SendKey（SCT/SCU 开头） | sct.ftqq.com |
+| Bark | deviceKey、服务器地址（自建填自己的）、级别、分组 | iOS Bark App 复制 key |
+
+**安全建议**：token 写在 UI 里会明文存到 `data/notify.json`。更安全的做法是不填 UI、
+改用环境变量（配置为空时自动回退）：
+
+```yaml
+services:
+  guanka:
+    # ...
+    environment:
+      - WXPUSHER_APP_TOKEN=AT_xxx
+      - WXPUSHER_UIDS=UID_xxx
+      - SERVERCHAN_SENDKEY=SCTxxx
+      - BARK_DEVICE_KEY=xxxxx
+```
+
+- 去重：同一提醒（卡 + 周期 + 阈值）只推一次，避免刷屏
+- 单通道失败不影响其余通道，失败原因记在「最近推送记录」里
+- 手动验证：设置页可「发送测试」与「立即检查」；也可 `curl -X POST http://localhost:3000/api/notify/check`
+
 ## 批量导入 CSV
 
 表头（与原版模板一致）：

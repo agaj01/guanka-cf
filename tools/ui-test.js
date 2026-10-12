@@ -285,7 +285,28 @@ async function main() {
     }
   }
 
-  // ---- 13. 页面错误 ----
+  // ---- 13. 提醒设置 ----
+  const notifyBtn = $('#btn-notify');
+  if (notifyBtn) {
+    notifyBtn.click();
+    const nm = await waitFor(() => $('#modal') && $('#nc-wxpusher-enabled'));
+    check('打开提醒设置弹窗', nm);
+    if (nm) {
+      check('三通道配置区块齐全', !!($('#nc-serverchan-sendkey') && $('#nc-bark-deviceKey') && $('#nc-wxpusher-appToken')));
+      check('提醒规则字段齐全', !!($('#n-feeDays') && $('#n-repayDays') && $('#n-taskDays') && $('#n-interval')));
+      $('#n-save').click();
+      const saved = await waitFor(() => $('#n-result') && $('#n-result').textContent.includes('已保存'));
+      check('提醒配置保存成功', saved);
+      $('#n-check').click();
+      const checked = await waitFor(() => $('#n-result') && /检查|跳过|没有已启用/.test($('#n-result').textContent));
+      check('立即检查返回处理结果', checked, JSON.stringify($('#n-result') && $('#n-result').textContent));
+      $$('#modal [data-close]').forEach((b) => b.click());
+    }
+  } else {
+    check('打开提醒设置弹窗', false, '未找到提醒按钮');
+  }
+
+  // ---- 14. 页面错误 ----
   check('运行期间无未捕获页面错误', pageErrors.length === 0, pageErrors.join('; '));
 
   // ---- 汇总 ----

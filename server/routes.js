@@ -3,6 +3,8 @@
 const crypto = require('crypto');
 const U = require('./util');
 const { SEED_CARDS, SEED_VERSION } = require('./seed');
+const notifier = require('./notifier');
+const reminder = require('./reminder');
 
 const CARD_FIELDS = ['bank', 'name', 'level', 'org', 'annualFee', 'waiverType', 'waiverCondition', 'waiverPolicy', 'startCredit', 'benefits', 'applyCondition', 'note'];
 const CSV_HEADER = ['银行', '卡片名称', '卡等级', '卡组织', '年费', '免年费类型', '刷免条件', '免年费政策', '起批额度', '主要权益', '申请条件', '备注'];
@@ -278,6 +280,11 @@ function matchRoute(method, pathname) {
     ['POST', /^\/api\/mycards\/([^/]+)\/benefits\/(\d+)\/count$/],
     ['POST', /^\/api\/mycards\/([^/]+)\/points$/],
     ['POST', /^\/api\/mycards\/([^/]+)\/asset$/],
+    ['GET', /^\/api\/notify\/config$/],
+    ['PUT', /^\/api\/notify\/config$/],
+    ['POST', /^\/api\/notify\/test$/],
+    ['POST', /^\/api\/notify\/check$/],
+    ['GET', /^\/api\/notify\/history$/],
     ['POST', /^\/api\/shutdown$/],
   ];
   for (const [m, re] of routes) {
@@ -560,6 +567,35 @@ async function handle(method, pathname, url, body) {
     store.write('benefits', recs);
     return json({ ok: true, used: st.used + count, total: st.total }, 201);
   }
+  // ---- 提醒功能 ----
+  if (pathname === '/api/notify/config' && method === 'GET') {
+    return json(reminder.normalizeConfig(store.read('notify', null)));
+  }
+  if (pathname === '/api/notify/config' && method === 'PUT') {
+    const cfg = reminder.normalizeConfig(Object.assign({}, store.read('notify', null), body || {}, {
+      // sentLog/history 不能被前端覆盖，只允许通过 check 结果更新
+      sentLog: (store.read('notify', null) || {}).sentLog || {},
+      history: (store.read('notify', null) || {}).history || [],
+    }));
+    store.write('notify', cfg);
+    return json(cfg);
+  }
+  if (pathname === '/api/notify/test' && method === 'POST') {
+    const cfg = reminder.normalizeConfig(store.read('notify', null));
+    const enabled = notifier.enabledChannels(cfg);
+    if (!enabled.length) return err('请先启用至少一个提醒通道');
+    const results = await notifier.notifyAll(cfg, '管卡提醒测试', '这是一条来自管卡的**测试提醒**。\n\n- 通道：' + enabled.join('、') + '\n- 时间：' + new Date().toLocaleString('zh-CN'));
+    const okCount = results.filter((r) => r.ok).length;
+    return json({ ok: okCount > 0, results });
+  }
+  if (pathname === '/api/notify/check' && method === 'POST') {
+    return json(await runNotifyChecks(true)); // 手动触发：忽略节流
+  }
+  if (pathname === '/api/notify/history' && method === 'GET') {
+    const cfg = reminder.normalizeConfig(store.read('notify', null));
+    return json({ history: cfg.history || [], enabled: cfg.enabled, intervalMinutes: cfg.intervalMinutes });
+  }
+
   const ptsMatch = pathname.match(/^\/api\/mycards\/([^/]+)\/points$/);
   if (ptsMatch && method === 'POST') {
     const myCards = getMyCards();
@@ -619,6 +655,23 @@ function normalizeBenefits(benefits, fallbackNames) {
   return (fallbackNames || []).map((name) => ({ name, total: 1, resetCycle: '自然年' }));
 }
 
+// 提醒检查：force=true 时忽略节流（手动触发）；否则按 intervalMinutes 节流
+async function runNotifyChecks(force) {
+  const cfg = reminder.normalizeConfig(store.read('notify', null));
+  if (!cfg.enabled) return { skipped: true, reason: '提醒未启用' };
+  if (!force && cfg.lastCheckAt) {
+    const gap = (Date.now() - new Date(cfg.lastCheckAt).getTime()) / 60000;
+    if (gap < cfg.intervalMinutes) return { skipped: true, reason: `距上次检查 ${Math.round(gap)} 分钟，未达 ${cfg.intervalMinutes} 分钟间隔` };
+  }
+  const idx = buildIndexes();
+  const now = new Date();
+  const cards = getMyCards().map((m) => computeMyCard(m, now, idx));
+  const out = await reminder.runChecks(cards, cfg, notifier, now);
+  cfg.lastCheckAt = now.toISOString();
+  store.write('notify', cfg);
+  return Object.assign({ skipped: false }, out);
+}
+
 // 卡种信息变更后同步所有持卡的快照字段
 function syncMyCardSnapshots() {
   const myCards = getMyCards();
@@ -635,6 +688,6 @@ function syncMyCardSnapshots() {
 }
 
 module.exports = {
-  init, handle,
+  init, handle, runNotifyChecks,
   _internals: { computeMyCard, computeStats, benefitUsed, benefitHistory, waiverState, normalizeCard, cardKey, buildIndexes },
 };
