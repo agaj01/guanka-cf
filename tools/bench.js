@@ -46,12 +46,12 @@ store.write('mycards', myCards);
 store.write('consumptions', consumptions);
 store.write('benefits', benefits);
 
-// 新实现：一次索引 + 全量计算（模拟 GET /api/mycards 真实路径）
+// 新实现：一次索引 + 全量计算（模拟 GET /api/mycards 真实路径：computeStats 复用已算好的持卡列表）
 const { computeMyCard, computeStats, buildIndexes } = routes._internals;
 const t0 = process.hrtime.bigint();
 const idx = buildIndexes();
 const list = myCards.map((m) => computeMyCard(m, new Date(), idx));
-const stats = computeStats(new Date(), idx);
+const stats = computeStats(new Date(), idx, list);
 const t1 = process.hrtime.bigint();
 const msNew = Number(t1 - t0) / 1e6;
 
@@ -74,9 +74,10 @@ for (const m of myCards) oldStyleCompute(m, new Date()); // computeStats 会再�
 const t3 = process.hrtime.bigint();
 const msOld = Number(t3 - t2) / 1e6;
 
-console.log('数据规模: %d 持卡 / %d 消费 / %d 权益记录', CARDS_N, TX_N, BEN_N);
-console.log('旧实现（每卡全表 filter × 2 轮）: %.1f ms', msOld);
-console.log('新实现（一次索引 + 分桶）:        %.1f ms', msNew);
-console.log('提升: %.1fx', msOld / msNew);
-console.log('校验: stats.totalCards=%d monthSpend=%d feeExpiring=%d', stats.totalCards, stats.monthSpend, stats.feeExpiring.length);
+const f1 = (n) => n.toFixed(1);
+console.log('数据规模: ' + CARDS_N + ' 持卡 / ' + TX_N + ' 消费 / ' + BEN_N + ' 权益记录');
+console.log('旧实现（每卡全表 filter × 2 轮）: ' + f1(msOld) + ' ms');
+console.log('新实现（一次索引 + 分桶）:        ' + f1(msNew) + ' ms');
+console.log('提升: ' + f1(msOld / msNew) + 'x');
+console.log('校验: stats.totalCards=' + stats.totalCards + ' monthSpend=' + stats.monthSpend + ' feeExpiring=' + stats.feeExpiring.length);
 fs.rmSync(DATA, { recursive: true, force: true });

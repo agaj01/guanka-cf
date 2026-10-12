@@ -348,6 +348,14 @@ async function main() {
   const sortSel = $('#sort-select');
   check('筛选与排序控件存在', !!filterSel && !!sortSel);
   if (filterSel && sortSel) {
+    // 交叉误标回归：filter=fee 时，sort 下拉框的「按年费临近」(同 value=fee) 不得被误标选中
+    filterSel.value = 'fee';
+    filterSel.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await sleep(150);
+    const feeOpt = $('#filter-select option[value="fee"]');
+    const sortFeeOpt = $('#sort-select option[value="fee"]');
+    check('筛选选中态不污染排序下拉框', feeOpt.selected && !sortFeeOpt.selected,
+      'filter.fee=' + feeOpt.selected + ' sort.fee=' + sortFeeOpt.selected);
     filterSel.value = 'unpaid';
     filterSel.dispatchEvent(new w.Event('change', { bubbles: true }));
     await sleep(150);
@@ -357,6 +365,8 @@ async function main() {
     sortSel.dispatchEvent(new w.Event('change', { bubbles: true }));
     await sleep(150);
     check('切换排序后页面正常渲染', $$('.card-row').length > 0 || !!$('.empty-tip'));
+    const filterUnpaid = $('#filter-select option[value="unpaid"]');
+    check('排序选中态不污染筛选下拉框', filterUnpaid.selected, 'filter.unpaid=' + filterUnpaid.selected);
   }
 
   // ---- 16. 页面错误 ----
