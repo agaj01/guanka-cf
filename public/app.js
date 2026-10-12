@@ -1306,7 +1306,10 @@ function openImportModal() {
     if (btn.disabled) return; // 防重复提交：文件读取+解析期间按钮置灰
     const file = $('#import-file').files[0];
     let text = $('#import-text').value;
-    if (file) text = await file.text();
+    if (file) {
+      try { text = await file.text(); }
+      catch (e) { return toast('文件读取失败：' + (e.message || e.name), 'error'); }
+    }
     if (!text.trim()) return toast('请选择文件或粘贴内容', 'error');
     btn.disabled = true;
     try {

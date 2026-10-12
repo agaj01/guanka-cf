@@ -80,12 +80,12 @@ function serveStatic(res, pathname) {
 
 const server = http.createServer(async (req, res) => {
   let pathname;
+  let urlObj;
   try {
-    const url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
+    urlObj = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
     // 畸形编码（如 /%、/%E0%A4%A）会抛 URIError：必须接住返回 400，
     // 否则 async 回调变成 rejected promise → unhandledRejection → 进程退出
-    pathname = decodeURIComponent(url.pathname);
-    var urlObj = url;
+    pathname = decodeURIComponent(urlObj.pathname);
   } catch (e) {
     send(res, 400, { error: 'Bad request' });
     return;
