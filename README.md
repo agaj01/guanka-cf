@@ -33,6 +33,18 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 
 首次启动自动写入内置卡种库（83 张常见卡 / 15 家银行，示例数据），无需任何配置。
 
+## 在群晖 NAS 上部署
+
+完整步骤见 **[DEPLOY-SYNOLOGY.md](DEPLOY-SYNOLOGY.md)**（Container Manager 图形界面 / SSH 两种方式、
+目录与权限避坑、备份升级、离线导入镜像、公网访问安全提示）。
+
+要点速览：
+
+1. Container Manager（套件中心安装）→ 建目录 `/volume1/docker/credit-card-manager`
+2. 上传源码（`Dockerfile`、`docker-compose.yml`、`server/`、`public/` 必须在**同一层**）→ 新建「项目」
+3. 粘贴本项目 `docker-compose.yml` 内容 → 验证 → 创建并启动 → 访问 `http://群晖IP:3000`
+4. 若改用「绑定目录挂载」，**必须** `chown -R 1000:1000` 数据目录（容器内以非 root 的 node 用户运行）
+
 ## 功能一览（与原版对照）
 
 | 模块 | 功能 |
