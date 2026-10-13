@@ -33,6 +33,36 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 
 首次启动自动写入内置卡种库（83 张常见卡 / 15 家银行，示例数据），无需任何配置。
 
+## 直接使用 Docker Hub 镜像（免构建）
+
+镜像由 GitHub Actions 自动构建并推送（amd64 + arm64 双架构，群晖等 ARM 机型可直接拉取）：
+
+```bash
+# 拉取并运行（把 <你的DockerHub用户名> 换成实际账号，如 folkson）
+docker run -d --name credit-card-manager \
+  -p 3000:3000 \
+  -v guanka-data:/app/data \
+  --restart unless-stopped \
+  <你的DockerHub用户名>/credit-card-manager:latest
+
+# 浏览器打开
+http://localhost:3000
+```
+
+群晖 NAS（Container Manager）等场景同样适用——arm64 与 amd64 架构会自动选择对应层。
+
+### 发布新版本镜像
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+打 tag 推送后 CI 自动构建并推送 `1.0.1` / `1.0` / `1` / `latest` 四个标签；
+也可在 GitHub Actions 页面对 `Build & Push Docker Hub` 手动 Run workflow（构建 `latest`）。
+
+> 仓库 Secrets 需配置 `DOCKERHUB_USERNAME`（Docker Hub 用户名）与 `DOCKERHUB_TOKEN`
+> （Docker Hub → Account Settings → Personal access tokens 生成的 Access Token，建议只给 Read/Write 权限）。
+
 ## 功能一览（与原版对照）
 
 | 模块 | 功能 |
