@@ -495,6 +495,137 @@ async function main() {
   fs.rmSync('.notify-test-data8', { recursive: true, force: true });
 
   console.log();
+  console.log('=== 5.14 提醒去重键的时间基准（R7 回归）===');
+  {
+    // repayItem / taskItem 的 key 必须用「传入的 now」，而非 new Date()。
+    // 否则测试/回溯注入历史日期时，key 里的年月会是真实当前月份，去重行为不可复现。
+    const pn = new Date(2026, 9, 31); // 2026-10-31（月末，落在任务提醒窗口内）
+
+    // 还款：同一天同一张卡 key 相同；换月（下期最后还款日变化）key 必须变化
+    const rc = { id: 'mc_r7', name: 'R7还款卡', alias: 'R7',
+      payment: { lastPayDate: '2026-11-04', payDaysLeft: 4, billDate: '2026-10-10', dueDate: '2026-11-01' } };
+    const cfgR = reminder.normalizeConfig({ rules: { repayBeforeDays: 7, taskRemainDays: 0, feeDays: [] } });
+    const r1 = reminder.collectReminders([rc], cfgR, pn, []).find((x) => x.type === 'repay');
+    const r2 = reminder.collectReminders([rc], cfgR, pn, []).find((x) => x.type === 'repay');
+    check('还款提醒 key 含最后还款日', !!r1 && r1.key.includes('2026-11-04'), r1 && r1.key);
+    check('同输入两次 key 相同（可复现）', !!r1 && !!r2 && r1.key === r2.key, (r1 && r1.key) + ' vs ' + (r2 && r2.key));
+    const rc2 = Object.assign({}, rc, { payment: Object.assign({}, rc.payment, { lastPayDate: '2026-12-04', payDaysLeft: 4 }) });
+    const r3 = reminder.collectReminders([rc2], cfgR, pn, []).find((x) => x.type === 'repay');
+    check('换期后还款 key 变化（可再次提醒）', !!r1 && !!r3 && r1.key !== r3.key, (r1 && r1.key) + ' vs ' + (r3 && r3.key));
+
+    // 刷卡任务：key 里的月份必须是传入 now 的月份，而非真实当前月份
+    const tc = { id: 'mc_t7', name: 'R7任务卡', alias: 'T7',
+      monthlySpendTarget: 10000, monthSpend: 1000, payment: {} };
+    const cfgT = reminder.normalizeConfig({ rules: { repayBeforeDays: 0, taskRemainDays: 3, feeDays: [] } });
+    const t1 = reminder.collectReminders([tc], cfgT, pn, []).find((x) => x.type === 'task');
+    const ym = pn.getFullYear() + '-' + String(pn.getMonth() + 1).padStart(2, '0');
+    check('刷卡任务 key 用传入 now 的年月 ' + ym, !!t1 && t1.key === 'task:mc_t7:' + ym, t1 && t1.key);
+    // 换月（跨到 11 月）后 key 应变化，使新一月的任务可再提醒一次
+    const t2 = reminder.collectReminders([tc], cfgT, new Date(2026, 10, 30), []).find((x) => x.type === 'task');
+    check('跨月后刷卡任务 key 变化', !!t1 && !!t2 && t1.key !== t2.key, (t1 && t1.key) + ' vs ' + (t2 && t2.key));
+  }
+
+  console.log();
+  console.log('=== 5.15 提醒检查回写不覆盖并发改动（R7 回归）===');
+  fs.rmSync('.notify-test-data9', { recursive: true, force: true });
+  {
+    const store9 = new Store('.notify-test-data9');
+    routes.init(store9);
+    // 预置一份配置（bark 指向 mock，便于推送成功且不发起外网请求）
+    store9.write('notify', reminder.normalizeConfig({
+      enabled: true, intervalMinutes: 60,
+      channels: { bark: { enabled: true, deviceKey: 'bkkey', server: base + '/bark' } },
+      rules: { feeDays: [], repayBeforeDays: 0, taskRemainDays: 0, billBeforeDays: 0, billOverdueRemind: 1 },
+    }));
+    // 造一张卡 + 一条「已逾期」账单：逾期提醒与「当前真实日期」无关，保证一定产生提醒项
+    const db9 = store9.read('cards', []);
+    const mc9 = (await routes.handle('POST', '/api/mycards', new URL('http://x/p'), {
+      cardId: db9[0].id, alias: 'R7配置卡', creditLimit: 50000, billingDay: 1,
+      repayMode: 'fixed', repayValue: 21, graceDays: 3, feeMonth: 1, feeDay: 1, benefits: [],
+    })).body;
+    await routes.handle('POST', '/api/bills', new URL('http://x/p'), {
+      myCardId: mc9.id, month: '2020-01', amount: 999, dueDate: '2020-01-31',
+    });
+    // 模拟「检查进行中」用户改了配置：在推送（网络操作）期间写入新的 deviceKey。
+    // 若回写用检查开头读到的旧 cfg，用户的改动就会被抹掉 → 断言失败。
+    const origNotifyAll = notifier.notifyAll;
+    notifier.notifyAll = async function (c, t, b) {
+      const p = reminder.normalizeConfig(store9.read('notify', null));
+      p.channels.bark.deviceKey = 'bkkey-用户新填的';
+      store9.write('notify', p);
+      return origNotifyAll.call(notifier, c, t, b);
+    };
+    let after;
+    try {
+      await routes.runNotifyChecks(true);
+      after = reminder.normalizeConfig(store9.read('notify', null));
+    } finally {
+      notifier.notifyAll = origNotifyAll;
+    }
+    check('检查回写后保留了用户的通道改动', after.channels.bark.deviceKey === 'bkkey-用户新填的', after.channels.bark.deviceKey);
+    check('检查回写后 lastCheckAt 已更新', !!after.lastCheckAt, after.lastCheckAt);
+    check('检查产生的 sentLog 已落盘', Object.keys(after.sentLog || {}).length > 0, JSON.stringify(after.sentLog));
+    store9.write('mycards', []); store9.write('notify', {});
+    fs.rmSync('.notify-test-data9', { recursive: true, force: true });
+  }
+
+  console.log();
+  console.log('=== 5.16 数据文件类型安全与损坏隔离（R7 回归）===');
+  fs.rmSync('.notify-test-dataA', { recursive: true, force: true });
+  {
+    const dirA = '.notify-test-dataA';
+    fs.mkdirSync(dirA, { recursive: true });
+    // R7-1：合法 JSON 但类型不对（对象/标量）→ 不抛错，回退为空数组/默认对象
+    fs.writeFileSync(dirA + '/billGroups.json', '{"a":1}');
+    fs.writeFileSync(dirA + '/mycards.json', 'null');
+    fs.writeFileSync(dirA + '/settings.json', '[1,2]');
+    const sA = new Store(dirA);
+    check('对象型数组文件 → readArray 返回 []', Array.isArray(sA.readArray('billGroups')) && sA.readArray('billGroups').length === 0, JSON.stringify(sA.readArray('billGroups')));
+    check('null 型数组文件 → readArray 返回 []', Array.isArray(sA.readArray('mycards')), JSON.stringify(sA.readArray('mycards')));
+    check('数组型配置对象 → readObject 回退默认', JSON.stringify(sA.readObject('settings', {})) === '{}', JSON.stringify(sA.readObject('settings', {})));
+    // 数组类文件（billGroups/mycards）类型不符会隔离并告警；配置类（settings）只回退不隔离（配置可重建）
+    check('数组类类型异常会累计告警', sA.warnings.length >= 2, JSON.stringify(sA.warnings));
+    check('配置类类型异常不隔离文件（可重建）', fs.existsSync(dirA + '/settings.json') && JSON.stringify(sA.readObject('settings', {})) === '{}', JSON.stringify(fs.readdirSync(dirA)));
+    // R7-2：语法损坏的 JSON → 隔离为 .bad-* 而非静默回退（防后续写入永久覆盖）
+    fs.writeFileSync(dirA + '/cards.json', '{ 坏掉的 JSON ');
+    const sB = new Store(dirA);
+    const arr = sB.readArray('cards');
+    const isolated = fs.readdirSync(dirA).filter((f) => f.startsWith('cards.json.bad-'));
+    check('语法损坏 → 回退空数组且不抛错', Array.isArray(arr) && arr.length === 0, JSON.stringify(arr));
+    check('语法损坏 → 原文件被隔离为 .bad-*', isolated.length === 1, JSON.stringify(fs.readdirSync(dirA)));
+    check('隔离后原文件名已被移走', !fs.existsSync(dirA + '/cards.json'));
+    check('隔离会记录告警', sB.warnings.some((w) => /cards\.json/.test(w)), JSON.stringify(sB.warnings));
+    fs.rmSync(dirA, { recursive: true, force: true });
+  }
+
+  console.log();
+  console.log('=== 5.17 sentLog 淘汰（R7 回归）===');
+  {
+    const cfgS = reminder.normalizeConfig({ rules: { repayBeforeDays: 0, taskRemainDays: 0, feeDays: [] } });
+    // 造 400 条 400 天前的旧记录 + 1 条近期记录；超过 200 条阈值才会触发清理
+    const nowS = new Date(2027, 0, 1);
+    const oldDay = new Date(nowS.getTime() - 400 * 86400000);
+    const oldStr = oldDay.getFullYear() + '-' + String(oldDay.getMonth() + 1).padStart(2, '0') + '-' + String(oldDay.getDate()).padStart(2, '0');
+    for (let i = 0; i < 400; i++) cfgS.sentLog['old:' + i] = oldStr;
+    cfgS.sentLog['recent:1'] = '2027-01-01';
+    await reminder.runChecks([], cfgS, notifier, nowS, []); // 无提醒项，但会执行 pruneSentLog
+    const keys = Object.keys(cfgS.sentLog);
+    check('400 天前的旧记录被清理', keys.filter((k) => /^old:/.test(k)).length === 0, '剩余 ' + keys.length);
+    check('近期记录被保留', keys.includes('recent:1'), JSON.stringify(keys));
+    // 阈值以下（<=200）不做全量扫描，记录原样保留
+    const cfgSm = reminder.normalizeConfig({ rules: { repayBeforeDays: 0, taskRemainDays: 0, feeDays: [] } });
+    for (let i = 0; i < 50; i++) cfgSm.sentLog['k:' + i] = oldStr;
+    await reminder.runChecks([], cfgSm, notifier, nowS, []);
+    check('小规模 sentLog 不做清理（跳过全量扫描）', Object.keys(cfgSm.sentLog).length === 50, String(Object.keys(cfgSm.sentLog).length));
+    // 值格式异常（非日期）也会被清掉
+    const cfgBad = reminder.normalizeConfig({ rules: { repayBeforeDays: 0, taskRemainDays: 0, feeDays: [] } });
+    for (let i = 0; i < 250; i++) cfgBad.sentLog['x:' + i] = oldStr;
+    cfgBad.sentLog['weird'] = 'not-a-date';
+    await reminder.runChecks([], cfgBad, notifier, nowS, []);
+    check('格式异常的 sentLog 值被清理', !('weird' in cfgBad.sentLog), JSON.stringify(Object.keys(cfgBad.sentLog).slice(0, 5)));
+  }
+
+  console.log();
   console.log('=== 6. 去重与推送记录 ===');
   const cfg2 = reminder.normalizeConfig({ enabled: true, channels: { bark: { enabled: true, deviceKey: 'bkkey', server: base + '/bark' } } });
   const out1 = await reminder.runChecks(cards, cfg2, notifier, now);

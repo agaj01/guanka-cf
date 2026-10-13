@@ -1,7 +1,137 @@
 # 管卡 Docker 版 — 代码复盘报告
 
 > 范围：`credit-card-manager/` 全量代码（server 6 文件 + public 3 文件 + tools 6 脚本）
-> 本文件包含六轮复盘：第一轮（首轮交付后）、第二轮（P0/P1/P2 对齐金山文档落地后）、第三轮（全量通读后）、第四轮（对第三轮修复的复查）、第五轮（边界与一致性探测）、第六轮（新增合并账单组功能）
+> 本文件包含七轮复盘：第一轮（首轮交付后）、第二轮（P0/P1/P2 对齐金山文档落地后）、第三轮（全量通读后）、第四轮（对第三轮修复的复查）、第五轮（边界与一致性探测）、第六轮（新增合并账单组功能）、第七轮（数据安全与时间基准通读）
+
+---
+
+# 第七轮复盘（2026-10-13，数据安全与时间基准通读）
+
+> 触发：用户要求「复盘项目，查看 bug，优化代码」
+> 侧重：**外部可触发的数据损坏路径**（手改 JSON、异常断电、磁盘满、版本回滚）与**时间基准一致性**（测试/回溯注入历史日期）
+> 结论：修复 9 项缺陷（4 项高危、2 项中危、3 项低危），其中 **R7-2 数据损坏静默回退** 与 **R7-5 前端无法取消勾选成员** 是前六轮未覆盖的真实缺陷
+> 验证：dates-test **39/39** ｜ notify-test **128/128**（新增 21 项）｜ ui-test **71/71**（新增 6 项）｜ bench 无回归（1.0–1.3x 测量噪音）
+
+## 一、修复的缺陷
+
+### R7-1 数据文件「合法 JSON 但非数组」→ TypeError 崩溃（健壮性，高）— ✅ 已修复
+
+`store.read(name, [])` 只保证「读取失败时返回 `[]`」，**不校验解析结果的类型**。
+当 `billGroups.json` 被写成 `{"a":1}`（合法 JSON）、或 `mycards.json` 被写成 `null` 时，
+`read()` 会把这个值原样返回，随后 `groups.map(...)` / `for (const m of myCards)` / `recs.push(...)`
+直接抛 `TypeError`：
+
+- 启动期（`routes.init()` 预热归一）→ **进程启动失败**
+- 运行期（`GET /api/mycards`、`GET /api/billgroups`）→ **接口 500**
+
+**修复**：`server/db.js` 新增类型安全 API——
+`readArray(name)` 保证数组类数据集永远是数组（类型不符时隔离并回退 `[]`），
+`readObject(name, fallback)` 保证配置类永远是普通对象。
+`routes.js` 全部数据读取统一改走这两个 API（`getCards/getMyCards/getConsumptions/getBenefits/getBills/getBillGroups/getNotifyRaw`）。
+
+> 实测：`billGroups.json = {"a":1}`、`mycards.json = null`、`settings.json = [1,2]`
+> → 分别得到 `[]` / `[]` / `{}`，**不再抛错**，且累计 3 条告警。
+
+### R7-2 JSON 损坏静默回退 → 任意一次写入即永久覆盖（数据安全，高）— ✅ 已修复
+
+原 `read()` 在 `JSON.parse` 失败时**静默回退默认值**（`data = fallback`）。
+危险之处在于：回退只发生在内存里，文件仍是坏的；但此后**任意一次写入**
+（记一笔消费、点一次开关、改一个设置）都会用这份「空的」内存数据覆盖原文件 →
+**用户全部数据永久丢失，且无任何提示**。
+
+**修复**：`_quarantine(name, reason)` —— 解析失败或类型不符时，把坏文件改名
+为 `<name>.json.bad-<时间戳>` 隔离，并把告警累积到 `store.warnings`（由 `index.js` 打印）。
+隔离后本次以空数据继续，但**原始字节仍在磁盘上**，用户可手工抢救。
+
+> 实测：手工写入 `cards.json = '{ 坏掉的 JSON '` → 文件被重命名为 `cards.json.bad-1791878…`，
+> 目录中同时出现隔离文件，`store.warnings` 记录「cards.json 内容不是合法 JSON，已隔离为 …」。
+
+### R7-3 sentLog 无限增长（性能 / 存储，中）— ✅ 已修复
+
+去重记录 `cfg.sentLog[key] = 推送日期` 只增不减。key 都带日期/月份，历史条目永不命中，
+却会随使用年限无限堆积——**实测 400 天 → sentLog 400 条**，最终把 `notify.json` 撑大并拖慢每次读写。
+
+**修复**：`reminder.js` 新增 `pruneSentLog(cfg, now)`，在每次 `runChecks` 末尾调用。
+保留窗口 **120 天**（覆盖所有提醒周期：最长约 2 个月），`keys.length <= 200` 时跳过全量扫描。
+值格式异常（非 `YYYY-MM-DD`）的一并清理。
+
+> 实测：400 条 400 天前的旧记录 → 全部清空；近期记录保留；50 条小规模时原样保留（跳过扫描）。
+
+### R7-4 提醒检查回写覆盖用户在检查期间的配置改动（正确性，中）— ✅ 已修复
+
+`runNotifyChecksInner` 在开头读取配置 → 逐条推送（**网络操作，可能数秒**）→ 末尾
+`store.write('notify', cfg)` **整份回写**。若用户在推送这几秒内改了通道或规则，
+改动会被这份「几秒前的旧配置」直接抹掉。
+
+**修复**：回写时只覆盖「检查自身产生」的字段（`lastCheckAt` / `sentLog` / `history`），
+其余字段以**最新读取的配置**为准。
+
+> 实测：mock 推送回调里把 `bark.deviceKey` 改成「用户新填的」→ 检查结束后该值仍在，未被回滚。
+
+### R7-5 前端无法取消勾选移出成员（功能失效，高）— ✅ 已修复
+
+`memberChecklistHtml()` 把「已在别的账单组」的卡全部 `disabled`。
+但「管理账单组」编辑弹窗复用了同一函数——**属于本组的成员也被 disabled**，
+导致用户**无法取消勾选把卡片移出该组**，「成员（取消勾选可移出该组）」的功能形同虚设。
+
+**修复**：函数改为 `memberChecklistHtml(checkedIds, currentGid)`，新增「本组例外」判断——
+属于**正在编辑的组**的卡保持可勾选；属于**其它组**的卡才 `disabled` 并标注「（已在「xxx」）」。
+
+### R7-6 `deleteCardType` 未判空（前端健壮性，低）— ✅ 已修复
+
+删除卡种时未校验目标是否存在即访问其属性。补 `if (!c) return toast('卡种不存在，可能已被删除', 'error');`。
+
+### R7-7 `feeAlertOfWaived(mc, feeStatus)` 的 `feeStatus` 是死参（清理，低）— ✅ 已修复
+
+函数体从未使用该参数，去掉以免误导（第二轮的 R2-2 修复已把分级逻辑内联）。
+
+### R7-8 `syncMyCardSnapshots` O(持卡数 × 卡种数)（性能，低）— ✅ 已修复
+
+循环体内 `getCards().find(...)` 是全表线性查找。改为先建 `Map` 索引
+（`new Map(getCards().map(c => [c.id, c]))`），整体降为 O(持卡数 + 卡种数)。
+
+### R7-9 `scrollIntoView` 无存在性判断（前端健壮性，中）— ✅ 已修复
+
+`openBillGroupsModal` 定位后直接 `el.scrollIntoView({ block: 'center' })`。
+该 API 在部分环境（无头浏览器、旧内核、自动化测试环境）不存在，
+一旦缺失就抛 `TypeError` 并**中断整个弹窗渲染流程**（后续按钮绑定全部失效）。
+本轮新增的 ui-test 断言恰好踩中此路径并复现了崩溃。
+
+**修复**：加 `typeof el.scrollIntoView === 'function'` 判断后再调用（滚动仅为体验优化，缺失不应影响功能）。
+
+## 二、通读确认无问题
+
+- **组名 XSS**：`openBillGroupsModal` / 编辑弹窗输出的组名均经 `esc()` 转义，`innerHTML` 注入不成立
+- **服务端拒绝「改组为 1 张」**：属正确的业务约束（避免产生名存实亡的组），非缺陷
+- **提醒去重键语义**：`fee` 区分 `today`/阈值、`repay:group` 区分 `today`/`d+N`、`bill` 区分 `due`/`overdue`，均已正确
+
+## 三、时间基准一致性修正
+
+`repayItem(m, days)` / `taskItem(m, remainDays, gap)` 的兜底 key 用 `todayStr()`（**真实当前日期**）
+而非 `collectReminders(cards, cfg, now, bills)` 传入的 `now`。测试或回溯导入历史数据时，
+key 里的年月会漂移到真实月份，去重行为不可复现。
+
+**修复**：两函数改为接收 `now`，key 中的年月取 `now` 的年月，与整条链路的时间基准对齐。
+
+> 实测：`now=2026-10-31` 时 task key 为 `task:mc_t7:2026-10`（与传入 now 一致）；
+> 跨到 11 月后 key 变化，使新一月的任务可再提醒一次。
+
+## 四、端到端回归（本轮执行）
+
+| 脚本 | 结果 | 说明 |
+|---|---|---|
+| `tools/dates-test.js` | **39/39** | 日期引擎无回归 |
+| `tools/notify-test.js` | **128/128** | 新增 21 项：key 时间基准、配置回写、数据隔离、sentLog 淘汰 |
+| `tools/ui-test.js` | **71/71** | 新增 6 项：账单组列表/编辑弹窗层级、本组成员可勾选、仅他组禁用 |
+| `tools/bench.js` | 50 卡 13–19ms | 索引化后无回归（多次运行 1.0–1.3x 波动，属测量噪音） |
+
+## 五、本轮新增测试基建
+
+- `notify-test` 5.14：还款/刷卡任务 key 的时间基准与可复现性
+- `notify-test` 5.15：提醒检查回写不覆盖并发用户改动（用 monkey-patch 在推送回调里改配置）
+- `notify-test` 5.16：数据文件类型安全（对象/null/数组型）与损坏隔离（`.bad-*` 落盘）
+- `notify-test` 5.17：sentLog 淘汰（400 天旧记录清理 / 小规模跳过 / 格式异常清理）
+- `ui-test` §16：管理账单组弹窗层级（列表 → 编辑）+ 本组成员复选框必须可勾选
 
 ---
 

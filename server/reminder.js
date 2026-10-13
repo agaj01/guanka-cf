@@ -114,7 +114,7 @@ function feeItem(m, days, feeDayThreshold) {
   };
 }
 
-function repayItem(m, days) {
+function repayItem(m, days, now) {
   const name = m.alias || m.name || '未命名卡片';
   const p = m.payment || {};
   const title = days === 0 ? `今日还款：${name}` : `还款提醒：${name} ${days} 天后到期`;
@@ -126,11 +126,14 @@ function repayItem(m, days) {
     `- 最后还款日：${p.lastPayDate || '—'}（${days === 0 ? '就是今天' : `还有 ${days} 天`}）`,
     `- 额度：¥${money(m.creditLimit)}`,
   ].join('\n');
-  // key 按最后还款日去重：同一天同一张卡只推一次，跨期（日期变化）可再次提醒
-  return { type: 'repay', key: `repay:${m.id}:${p.lastPayDate || todayStr().slice(0, 7)}`, title, body };
+  // key 按最后还款日去重：同一天同一张卡只推一次，跨期（日期变化）可再次提醒。
+  // 兜底用「传入 now 的年月」而非当前真实时间，保证时间基准与 collectReminders 一致（便于测试注入历史日期）
+  const ym = (now || new Date());
+  const fallbackYm = ym.getFullYear() + '-' + String(ym.getMonth() + 1).padStart(2, '0');
+  return { type: 'repay', key: `repay:${m.id}:${p.lastPayDate || fallbackYm}`, title, body };
 }
 
-function taskItem(m, remainDays, gap) {
+function taskItem(m, remainDays, gap, now) {
   const name = m.alias || m.name || '未命名卡片';
   const title = `刷卡任务：${name} 还差 ¥${money(gap)}`;
   const body = [
@@ -139,7 +142,9 @@ function taskItem(m, remainDays, gap) {
     `- 本月消费：¥${money(m.monthSpend)} / 目标 ¥${money(m.monthlySpendTarget)}`,
     `- 还差：¥${money(gap)}（本月剩 ${remainDays} 天）`,
   ].join('\n');
-  return { type: 'task', key: `task:${m.id}:${todayStr().slice(0, 7)}`, title, body };
+  const dd = (now || new Date());
+  const ym = dd.getFullYear() + '-' + String(dd.getMonth() + 1).padStart(2, '0');
+  return { type: 'task', key: `task:${m.id}:${ym}`, title, body };
 }
 
 function billItem(b, m, daysLeft) {
@@ -236,14 +241,14 @@ function collectReminders(cards, cfg, now, bills) {
         if (g) {
           if (g[0].id === m.id) items.push(groupRepayItem(g[0].billGroupId, g[0].billGroupName || '合并账单组', g, d, m.payment.lastPayDate));
         } else {
-          items.push(repayItem(m, d));
+          items.push(repayItem(m, d, now));
         }
       }
     }
     // ③ 月刷卡任务未达标（月末临近；按卡独立，不合并）
     if (cfg.rules.taskRemainDays > 0 && m.monthlySpendTarget > 0) {
       const gap = Math.max(0, Number(m.monthlySpendTarget) - Number(m.monthSpend || 0));
-      if (gap > 0 && remainDaysInMonth <= cfg.rules.taskRemainDays) items.push(taskItem(m, remainDaysInMonth, gap));
+      if (gap > 0 && remainDaysInMonth <= cfg.rules.taskRemainDays) items.push(taskItem(m, remainDaysInMonth, gap, now));
     }
   }
   // ④ 账单流水：未还账单到期前提醒 + 已过到期日仍未还的逾期提醒。
@@ -319,7 +324,29 @@ async function runChecks(cards, cfg, notifier, now, bills) {
       ok: okList.length > 0,
     });
   }
+  pruneSentLog(cfg, now);
   return { checked: items.length, sent: pending.length, results };
+}
+
+/**
+ * 淘汰过期去重记录。
+ * 去重键里都带日期/月份，只需覆盖「近期」即可防重复；不做清理会随使用年限无限增长
+ * （实测 400 天后仍有 400 条），最终把 notify.json 撑大并拖慢每次读写。
+ * 保留窗口 120 天，既覆盖所有提醒周期（最长约 2 个月），又给跨期回溯留足余量。
+ */
+const SENTLOG_KEEP_DAYS = 120;
+function pruneSentLog(cfg, now) {
+  const log = cfg.sentLog;
+  if (!log || typeof log !== 'object') { cfg.sentLog = {}; return; }
+  const keys = Object.keys(log);
+  if (keys.length <= 200) return; // 小规模直接跳过，避免每次检查都做全量扫描
+  const cutoff = new Date((now || new Date()).getTime() - SENTLOG_KEEP_DAYS * 86400000);
+  const cutoffStr = todayStr(cutoff);
+  for (const k of keys) {
+    const d = log[k];
+    // 值应为「推送日期」字符串；格式异常或早于保留窗口的一律清掉
+    if (typeof d !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(d) || d < cutoffStr) delete log[k];
+  }
 }
 
 function pushHistory(cfg, entry) {

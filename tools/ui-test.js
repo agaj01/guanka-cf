@@ -443,6 +443,40 @@ async function main() {
               $('[data-close]').click();
               await sleep(200);
             }
+            // R7-5 回归：管理账单组 → 列表弹窗 → 该组「编辑」→ 属于本组的成员必须【可勾选】
+            // （否则无法取消勾选移出成员，编辑弹窗核心功能失效）
+            if (gEdit) {
+              gEdit.click();
+              await sleep(250);
+              const listWrap = $('#modal-wrap');
+              check('「管理账单组」打开账单组列表', !!listWrap && /合并账单组/.test($('.modal-title', listWrap).textContent),
+                listWrap ? $('.modal-title', listWrap).textContent : '无弹窗');
+              const rowEdit = $$('.bg-group [data-act="bg-edit"]')[0];
+              check('列表含该组「编辑」按钮', !!rowEdit);
+              if (rowEdit) {
+                rowEdit.click();
+                await sleep(250);
+                const wrap2 = $('#modal-wrap');
+                check('「编辑」打开编辑弹窗', !!wrap2 && /编辑账单组/.test($('.modal-title', wrap2).textContent),
+                  wrap2 ? $('.modal-title', wrap2).textContent : '无弹窗');
+                const boxes = $$('#bg-members input');
+                const selfBoxes = boxes.filter((b) => grouped2.some((m) => m.id === b.value));
+                check('本组成员全部可勾选（未被 disabled）', selfBoxes.length === grouped2.length && selfBoxes.every((b) => !b.disabled),
+                  '本组成员 ' + selfBoxes.length + '/' + grouped2.length + '，disabled=' + selfBoxes.filter((b) => b.disabled).length);
+                check('本组成员复选框默认已勾选', selfBoxes.length > 0 && selfBoxes.every((b) => b.checked),
+                  selfBoxes.map((b) => b.checked).join(','));
+                // 被禁用的卡必须都属于「其它组」（不在任何组的卡应可自由勾选加入本组）
+                const disabledBoxes = boxes.filter((b) => b.disabled);
+                check('仅「其它组」成员被禁用', disabledBoxes.every((b) => !grouped2.some((m) => m.id === b.value)),
+                  '禁用 ' + disabledBoxes.length + ' 个，其中属本组 ' + disabledBoxes.filter((b) => grouped2.some((m) => m.id === b.value)).length);
+                $('[data-close]').click();
+                await sleep(300);
+              }
+              // 关闭外层列表弹窗（若已随内层一并关闭则跳过）
+              const closeL2 = $('[data-close]');
+              if (closeL2) closeL2.click();
+              await sleep(200);
+            }
           }
           // 清理：解散测试组
           const groups = await (await fetch(BASE + '/api/billgroups')).json();

@@ -13,6 +13,9 @@ data/*.tmp
 .probe-data/
 .bgprobe-data/
 .bgprobe.js
+.r7probe*.js
+.r7probe*-data/
+.r7probe-data/
 *.log
 
 # 依赖与系统文件

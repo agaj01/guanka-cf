@@ -651,18 +651,25 @@ async function openBillGroupsModal(focusGid) {
   });
   if (focusGid) {
     const el = modal.querySelector('.bg-group[data-gid="' + focusGid + '"]');
-    if (el) el.scrollIntoView({ block: 'center' });
+    // scrollIntoView 在部分环境（无头浏览器 / 旧内核 / 测试环境）不存在，直接调用会抛 TypeError
+    if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
   }
 }
 
-/** 成员勾选列表：已属其他组的卡置灰并说明原因，避免误选 */
-function memberChecklistHtml(checkedIds) {
+/**
+ * 成员勾选列表。
+ * @param checkedIds 预勾选的持卡 id
+ * @param currentGid 当前正在编辑的组 id。属于「本组」的卡必须保持可勾选（否则无法取消勾选移出成员）；
+ *                   属于「其它组」的卡置灰并说明原因，避免误选导致服务端拒绝
+ */
+function memberChecklistHtml(checkedIds, currentGid) {
   const groups = state.billGroups || [];
   return (state.myCards || []).map((m) => {
     const g = groups.find((x) => x.id === m.billGroupId);
+    const isSelf = !!(g && currentGid && g.id === currentGid);
     const label = (m.alias || m.name) + ' · ' + m.bank + ' · 还款 ' + ((m.payment && m.payment.lastPayDate) || '—');
-    const disabled = g ? ' disabled' : '';
-    const tag = g ? '（已在「' + esc(g.name) + '」）' : '';
+    const disabled = (g && !isSelf) ? ' disabled' : '';
+    const tag = (g && !isSelf) ? '（已在「' + esc(g.name) + '」）' : '';
     return '<label class="bg-member"><input type="checkbox" value="' + esc(m.id) + '"' + disabled +
       (checkedIds.includes(m.id) ? ' checked' : '') + '> <span>' + esc(label) + '</span>' +
       '<span style="color:var(--text-3);font-size:12px">' + tag + '</span></label>';
@@ -676,7 +683,7 @@ async function openBillGroupEditModal(gid) {
   openModal('<div class="modal-title">编辑账单组 — ' + esc(g.name) + '</div>',
     '<div class="form-grid">' + field('组名称', '<input id="bg-name" value="' + esc(g.name) + '">') + '</div>' +
     '<div style="margin-top:10px"><label style="font-size:12px;color:var(--text-2)">成员（取消勾选可移出该组）</label>' +
-    '<div id="bg-members">' + memberChecklistHtml(my) + '</div></div>',
+    '<div id="bg-members">' + memberChecklistHtml(my, gid) + '</div></div>',
     '<button class="btn" data-close>取消</button><button class="btn primary" id="bg-save">保存</button>');
   $('#bg-save').addEventListener('click', async () => {
     const name = $('#bg-name').value.trim();
@@ -1500,6 +1507,7 @@ function openCardTypeModal(id) {
 
 async function deleteCardType(id) {
   const c = state.cards.find((x) => x.id === id);
+  if (!c) return toast('卡种不存在，可能已被删除', 'error');
   if (!(await confirmDialog('确定删除卡种「' + c.name + '」？已添加的持卡不受影响（快照保留）。'))) return;
   try {
     await api('/api/cards/' + id, { method: 'DELETE' });

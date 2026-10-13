@@ -8,12 +8,16 @@ const reminder = require('./reminder');
 const D = require('./dates');
 
 // 账单流水（月账单 + 是否已还）
-function getBills() { return store.read('bills', []); }
+function getBills() { return store.readArray('bills'); }
 
 // ---------- 合并账单组 ----------
 // 组本身只存 id + 名称，成员关系记在 mycards[].billGroupId —— 单一事实来源，
 // 删卡/改组不会留下需要两头维护的孤儿成员表。
-function getBillGroups() { return store.read('billGroups', []); }
+function getBillGroups() { return store.readArray('billGroups'); }
+
+// 提醒原始配置：必须是对象。若文件被写成数组/标量，readObject 会回退默认值，
+// 避免 normalizeConfig 拿到非对象后把 sentLog/history 一起丢掉。
+function getNotifyRaw() { return store.readObject('notify', null); }
 
 function groupNameOf(groupId) {
   if (!groupId) return '';
@@ -55,17 +59,17 @@ function groupAssignError(myCards, target, groupId, now) {
 
 // 迁移/自愈：清掉指向已不存在账单组的悬空引用；成员被删空后解散空组
 function cleanBillGroups() {
-  const groups = getBillGroups();
-  const ids = new Set(groups.map((g) => g.id));
-  const myCards = getMyCards();
+  const groups = getBillGroups();          // readArray 保证是数组
+  const myCards = getMyCards();            // 同上
+  const ids = new Set(groups.map((g) => g && g.id).filter(Boolean));
   let changed = false;
   for (const m of myCards) {
     if (m.billGroupId && !ids.has(m.billGroupId)) { m.billGroupId = ''; changed = true; }
   }
   if (changed) store.write('mycards', myCards);
   const alive = new Set(myCards.map((m) => m.billGroupId).filter(Boolean));
-  const kept = (Array.isArray(groups) ? groups : []).filter((g) => alive.has(g.id));
-  if (kept.length !== (Array.isArray(groups) ? groups.length : 0)) store.write('billGroups', kept);
+  const kept = groups.filter((g) => g && alive.has(g.id));
+  if (kept.length !== groups.length) store.write('billGroups', kept);
 }
 
 // 年费达标状态（金山口径：无年费 / 手工声明 / 自动判定）
@@ -98,12 +102,13 @@ let store;
 
 function init(s) {
   store = s;
-  const meta = store.read('meta', { seedVersion: 0 });
-  let cards = store.read('cards', null);
-  if (!Array.isArray(cards) || cards.length === 0) {
+  const meta = store.readObject('meta', { seedVersion: 0 });
+  // 卡种库必须是数组：类型不符时 readArray 已隔离原文件并回退空数组，这里再按需播种
+  let cards = store.readArray('cards');
+  if (cards.length === 0) {
     cards = SEED_CARDS.map((c) => normalizeCard(c, null));
     store.write('cards', cards);
-      store.write('meta', { seedVersion: SEED_VERSION });
+    store.write('meta', Object.assign({}, meta, { seedVersion: SEED_VERSION }));
   } else if (meta.seedVersion !== SEED_VERSION) {
     // 升级时合并新卡种：已存在的（银行+名称+组织+等级）不重复导入
     const keys = new Set(cards.map(cardKey));
@@ -113,14 +118,16 @@ function init(s) {
       if (!keys.has(k)) { cards.push(normalizeCard(c, null)); keys.add(k); added++; }
     }
     store.write('cards', cards);
-    store.write('meta', { seedVersion: SEED_VERSION });
+    store.write('meta', Object.assign({}, meta, { seedVersion: SEED_VERSION }));
     if (added > 0) console.log(`[管卡] 卡种库已合并 ${added} 张新卡，当前共 ${cards.length} 张`);
   }
-  store.read('mycards', []);
-  store.read('consumptions', []);
-  store.read('benefits', []);
-  store.read('settings', { theme: 'light', bankOrder: [], banksCollapsed: {}, cardBanksCollapsed: {} });
-  store.read('billGroups', []);
+  // 预热并做类型归一：这些数据集必须都是数组，否则后续 .map/.push/.filter 会抛 TypeError
+  store.readArray('mycards');
+  store.readArray('consumptions');
+  store.readArray('benefits');
+  store.readArray('bills');
+  store.readArray('billGroups');
+  store.readObject('settings', { theme: 'light', bankOrder: [], banksCollapsed: {}, cardBanksCollapsed: {} });
   // 历史数据自愈：持卡上可能残留指向已删组的引用
   cleanBillGroups();
   migrateBenefitIds();
@@ -173,10 +180,10 @@ function normalizeCard(c, id) {
 }
 
 // ---------- 持卡计算 ----------
-function getConsumptions() { return store.read('consumptions', []); }
-function getBenefits() { return store.read('benefits', []); }
-function getMyCards() { return store.read('mycards', []); }
-function getCards() { return store.read('cards', []); }
+function getConsumptions() { return store.readArray('consumptions'); }
+function getBenefits() { return store.readArray('benefits'); }
+function getMyCards() { return store.readArray('mycards'); }
+function getCards() { return store.readArray('cards'); }
 
 // 每请求构建一次索引：消费按卡分桶（金额/笔数分开）、权益记录按 卡→序号 嵌套分桶。
 // 避免 computeMyCard/benefitUsed 对全表反复 filter（原实现 O(卡数 × 记录数)）。
@@ -259,8 +266,8 @@ function feeDaysColor(days, needsPayment) {
   return 'default';
 }
 
-// 已豁免卡的年费预警：达标即显示达标来源，无年费卡片显示「无年费」
-function feeAlertOfWaived(mc, feeStatus) {
+// 已豁免卡的年费预警：无年费卡片显示「无年费」，其余显示达标来源
+function feeAlertOfWaived(mc) {
   if (!(Number(mc.annualFee) > 0)) return '无年费';
   return '本年豁免';
 }
@@ -291,7 +298,7 @@ function computeMyCard(mc, now, idx) {
     : (nextFee.getFullYear() - now.getFullYear()) * 12 + (nextFee.getMonth() - now.getMonth());
   // 年费预警分级基于「距下次年费日天数」（原始记录无 feeDays 字段，之前读 mc.feeDays 恒为 undefined → 预警恒「正常」）
   const feeDaysLeft = days;
-  const feeAlert = feeWaived ? feeAlertOfWaived(mc, feeStatus) : D.feeAlertOf(mc, feeDaysLeft, false);
+  const feeAlert = feeWaived ? feeAlertOfWaived(mc) : D.feeAlertOf(mc, feeDaysLeft, false);
   return {
     ...mc,
     benefits,
@@ -475,9 +482,9 @@ async function handle(method, pathname, url, body) {
   if (pathname === '/api/shutdown') return { shutdown: true };
 
   // ---- 设置 ----
-  if (pathname === '/api/settings' && method === 'GET') return json(store.read('settings', {}));
+  if (pathname === '/api/settings' && method === 'GET') return json(store.readObject('settings', {}));
   if (pathname === '/api/settings' && method === 'PUT') {
-    const cur = store.read('settings', {});
+    const cur = store.readObject('settings', {});
     const patch = body || {};
     const allowed = ['theme', 'bankOrder', 'banksCollapsed', 'cardBanksCollapsed'];
     for (const k of allowed) if (k in patch) cur[k] = patch[k];
@@ -490,7 +497,7 @@ async function handle(method, pathname, url, body) {
 
   // ---- 卡种库 ----
   if (pathname === '/api/cards' && method === 'GET') {
-    return json(store.read('cards', []));
+    return json(getCards());
   }
   if (pathname === '/api/cards' && method === 'POST') {
     const c = normalizeCard(body || {}, null);
@@ -1002,19 +1009,19 @@ async function handle(method, pathname, url, body) {
 
   // ---- 提醒功能 ----
   if (pathname === '/api/notify/config' && method === 'GET') {
-    return json(reminder.normalizeConfig(store.read('notify', null)));
+    return json(reminder.normalizeConfig(getNotifyRaw()));
   }
   if (pathname === '/api/notify/config' && method === 'PUT') {
-    const cfg = reminder.normalizeConfig(Object.assign({}, store.read('notify', null), body || {}, {
+    const cfg = reminder.normalizeConfig(Object.assign({}, getNotifyRaw(), body || {}, {
       // sentLog/history 不能被前端覆盖，只允许通过 check 结果更新
-      sentLog: (store.read('notify', null) || {}).sentLog || {},
-      history: (store.read('notify', null) || {}).history || [],
+      sentLog: (getNotifyRaw() || {}).sentLog || {},
+      history: (getNotifyRaw() || {}).history || [],
     }));
     store.write('notify', cfg);
     return json(cfg);
   }
   if (pathname === '/api/notify/test' && method === 'POST') {
-    const cfg = reminder.normalizeConfig(store.read('notify', null));
+    const cfg = reminder.normalizeConfig(getNotifyRaw());
     const enabled = notifier.enabledChannels(cfg);
     if (!enabled.length) return err('请先启用至少一个提醒通道');
     const results = await notifier.notifyAll(cfg, '管卡提醒测试', '这是一条来自管卡的**测试提醒**。\n\n- 通道：' + enabled.join('、') + '\n- 时间：' + new Date().toLocaleString('zh-CN'));
@@ -1025,7 +1032,7 @@ async function handle(method, pathname, url, body) {
     return json(await runNotifyChecks(true)); // 手动触发：忽略节流
   }
   if (pathname === '/api/notify/history' && method === 'GET') {
-    const cfg = reminder.normalizeConfig(store.read('notify', null));
+    const cfg = reminder.normalizeConfig(getNotifyRaw());
     return json({ history: cfg.history || [], enabled: cfg.enabled, intervalMinutes: cfg.intervalMinutes });
   }
 
@@ -1126,7 +1133,7 @@ async function runNotifyChecks(force) {
 }
 
 async function runNotifyChecksInner(force) {
-  const cfg = reminder.normalizeConfig(store.read('notify', null));
+  const cfg = reminder.normalizeConfig(getNotifyRaw());
   if (!cfg.enabled) return { skipped: true, reason: '提醒未启用' };
   if (!force && cfg.lastCheckAt) {
     const gap = (Date.now() - new Date(cfg.lastCheckAt).getTime()) / 60000;
@@ -1137,16 +1144,24 @@ async function runNotifyChecksInner(force) {
   const cards = getMyCards().map((m) => computeMyCard(m, now, idx));
   const out = await reminder.runChecks(cards, cfg, notifier, now, getBills());
   cfg.lastCheckAt = now.toISOString();
-  store.write('notify', cfg);
+  // 回写时只覆盖「检查自身产生」的字段（lastCheckAt/sentLog/history），其余字段以最新配置为准。
+  // 推送是网络操作（可能数秒），期间用户可能改了通道或规则；若直接回写整份 cfg 会把用户的改动抹掉。
+  const latest = reminder.normalizeConfig(getNotifyRaw());
+  latest.lastCheckAt = cfg.lastCheckAt;
+  latest.sentLog = cfg.sentLog;
+  latest.history = cfg.history;
+  store.write('notify', latest);
   return Object.assign({ skipped: false }, out);
 }
 
 // 卡种信息变更后同步所有持卡的快照字段
 function syncMyCardSnapshots() {
   const myCards = getMyCards();
+  // 先建一次索引：此前在循环内每次 getCards().find(...)，复杂度 O(持卡数 × 卡种数)
+  const byId = new Map(getCards().map((c) => [c.id, c]));
   let changed = false;
   for (const mc of myCards) {
-    const c = getCards().find((x) => x.id === mc.cardId);
+    const c = byId.get(mc.cardId);
     if (!c) continue;
     const before = JSON.stringify(mc);
     mc.bank = c.bank; mc.name = c.name; mc.org = c.org; mc.level = c.level;
