@@ -7,9 +7,12 @@ data/*.tmp
 .test-data/
 .bench-data/
 .notify-test-data*/
+.uitest-data/
 .r5-data/
 .r5probe2-data/
 .probe-data/
+.bgprobe-data/
+.bgprobe.js
 *.log
 
 # 依赖与系统文件

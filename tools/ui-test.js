@@ -369,7 +369,106 @@ async function main() {
     check('排序选中态不污染筛选下拉框', filterUnpaid.selected, 'filter.unpaid=' + filterUnpaid.selected);
   }
 
-  // ---- 16. 页面错误 ----
+  // ---- 16. 合并账单组（前端交互）----
+  // 上一节把筛选留在 unpaid / 排序留在 fee，会把待建组的卡筛掉，这里先复位
+  const fs2 = $('#filter-select');
+  if (fs2) { fs2.value = 'all'; fs2.dispatchEvent(new w.Event('change', { bubbles: true })); await sleep(200); }
+  const bgBtn = $('#btn-billgroups');
+  check('工具栏含「合并账单」按钮', !!bgBtn);
+  if (bgBtn) {
+    bgBtn.click();
+    await sleep(200);
+    const modal = $('#modal-wrap');
+    const body = modal && $('.modal-body', modal);
+    check('打开合并账单弹窗', !!body && /合并账单组/.test($('.modal-title', modal).textContent));
+    const hasChecklist = !!(body && $('#bg-members') && $$('#bg-members input').length > 0);
+    check('弹窗含成员勾选列表', hasChecklist, 'input 数 ' + (body && $('#bg-members') ? $$('#bg-members input').length : 0));
+    check('弹窗含新建按钮', !!(body && $('#bg-create')));
+    // 通过前端真实建组：勾选两张还款日相同的卡
+    const cards = await fetchMyCards();
+    const cand = cards.filter((m) => !m.billGroupId);
+    let grouped = false;
+    if (cand.length >= 2) {
+      const boxes = $$('#bg-members input');
+      const pick = [];
+      for (const m of cand) {
+        const box = boxes.find((b) => b.value === m.id);
+        if (box) pick.push(box);
+        if (pick.length === 2) break;
+      }
+      if (pick.length === 2) {
+        pick.forEach((b) => { b.checked = true; });
+        $('#bg-name').value = 'UI测试合并组';
+        $('#bg-create').click();
+        await sleep(400);
+        const after = await fetchMyCards();
+        grouped = after.some((m) => m.billGroupName === 'UI测试合并组');
+        check('前端建组成功并回显组名', grouped, JSON.stringify(after.map((m) => m.billGroupName)));
+        if (grouped) {
+          // 建组走的是独立接口，页面 state 还是旧的：点一次导航触发 render（不重跑应用脚本，
+          // 否则事件监听会重复绑定、state 被重建，后续断言失去意义）
+          const nav = $('.nav-item');
+          if (nav) { nav.click(); await sleep(300); }
+          // 列表出现组徽章
+          const badge = $$('.badge').find((b) => /合并账单 · UI测试合并组/.test(b.textContent));
+          check('持卡行展示合并账单徽章', !!badge);
+          // 抽屉里出现合并账单组区块：必须先按「当前 DOM 行」定位，
+          // 再确认它是组内那张卡（徽章在别的行上，用行 id 反查最稳）
+          const after2 = await fetchMyCards();
+          const grouped2 = after2.filter((m) => m.billGroupName === 'UI测试合并组');
+          const row = $$('.card-row').find((r) => grouped2.some((m) => m.id === r.dataset.id));
+          if (row) {
+            // 注意：本文件的 $() 是单参形式，不能传上下文元素，行内查询必须用 row.querySelector
+            row.querySelector('[data-act="detail"]').click();
+            await sleep(250);
+            const drawer = $('#drawer');
+            if (process.env.UI_DEBUG) console.log('    [dbg] row=' + row.dataset.id + ' drawer=' + !!drawer + ' 文本=' + (drawer ? drawer.textContent.replace(/\s+/g, ' ').slice(0, 160) : ''));
+            const hasGroupSection = drawer && /合并账单组：UI测试合并组/.test(drawer.textContent);
+            check('抽屉含合并账单组区块', !!hasGroupSection);
+            const leave = drawer && drawer.querySelector('[data-act="group-leave"]');
+            check('抽屉含「退出合并账单」按钮', !!leave);
+            const gEdit = drawer && drawer.querySelector('[data-act="group-edit"]');
+            check('抽屉含「管理账单组」按钮', !!gEdit);
+            // 编辑持卡表单里有合并账单组下拉，且当前组被选中
+            const editBtn = drawer && drawer.querySelector('[data-act="edit-mycard"]');
+            if (editBtn) {
+              editBtn.click();
+              await sleep(200);
+              const sel = $('#f-billgroup');
+              check('编辑表单含合并账单组下拉', !!sel);
+              check('下拉框默认选中当前组', !!sel && sel.value && sel.selectedOptions[0] && /UI测试合并组/.test(sel.selectedOptions[0].textContent),
+                sel ? sel.value + '/' + (sel.selectedOptions[0] && sel.selectedOptions[0].textContent) : '无');
+              // 不合并选项必须存在
+              check('下拉框含「不合并」选项', !!sel && $$('#f-billgroup option').some((o) => o.value === ''));
+              $('[data-close]').click();
+              await sleep(200);
+            }
+          }
+          // 清理：解散测试组
+          const groups = await (await fetch(BASE + '/api/billgroups')).json();
+          const g = (groups || []).find((x) => x.name === 'UI测试合并组');
+          if (g) {
+            await fetch(BASE + '/api/billgroups/' + g.id, { method: 'DELETE' });
+            const cleaned = await fetchMyCards();
+            check('解散后成员恢复未合并', cleaned.every((m) => !/UI测试合并组/.test(m.billGroupName)));
+          }
+        }
+      } else {
+        check('前端建组成功并回显组名', false, '可用卡不足 2 张');
+      }
+    } else {
+      check('前端建组成功并回显组名', false, '无空闲持卡');
+    }
+    $$('[data-close]').forEach((b) => b.click());
+    await sleep(200);
+    // 清理残留组
+    const leftover = await (await fetch(BASE + '/api/billgroups')).json();
+    for (const g of leftover || []) {
+      if (g.name === 'UI测试合并组') await fetch(BASE + '/api/billgroups/' + g.id, { method: 'DELETE' });
+    }
+  }
+
+  // ---- 17. 页面错误 ----
   check('运行期间无未捕获页面错误', pageErrors.length === 0, pageErrors.join('; '));
 
   // ---- 汇总 ----

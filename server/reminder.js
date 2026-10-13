@@ -156,14 +156,69 @@ function billItem(b, m, daysLeft) {
   return { type: 'bill', key: `bill:${b.myCardId}:${b.month}:${daysLeft < 0 ? 'overdue' : 'due'}`, title, body };
 }
 
+/** 合并账单组的还款提醒：N 张卡合成一条（组内还款日一致，只推最早的到期日） */
+function groupRepayItem(gid, name, members, days, lastPayDate) {
+  const head = days === 0 ? `今日还款：${name}` : `还款提醒：${name} ${days} 天后到期`;
+  const title = `${head}（${members.length} 张卡合并）`;
+  const lines = members.map((m) => {
+    const p = m.payment || {};
+    const n = m.alias || m.name || '未命名卡片';
+    const extra = p.isInGrace ? '（宽限期内）' : '';
+    return `- ${n}｜${m.bank || '—'}｜银行到期 ${p.dueDate || '—'}${extra}`;
+  });
+  const body = [
+    `- 账单组：${name}（共 ${members.length} 张卡，合并还款）`,
+    `- 最后还款日：${lastPayDate}（${days === 0 ? '就是今天' : `还有 ${days} 天`}）`,
+    ...lines,
+  ].join('\n');
+  // key 带上「倒数第几天」：成员变动后组合并项仍在，若 key 只按日期，
+  // 同一组跨阈值（3→0 天）会被判成同一条而漏发当天的提醒（与单卡 fee 的 today 处理同理）
+  return { type: 'repay', key: `repay:group:${gid}:${lastPayDate}:${days === 0 ? 'today' : 'd' + days}`, title, body };
+}
+
+/** 合并账单组的账单流水提醒：把同一组内同一出账月的未还账单聚成一条 */
+function groupBillItem(gid, name, entries, month, daysLeft) {
+  const title = daysLeft < 0
+    ? `账单逾期未还：${name}（${month}）`
+    : `账单提醒：${name} ${daysLeft === 0 ? '今日到期' : `还有 ${daysLeft} 天`}`;
+  const total = entries.reduce((s, e) => s + (Number(e.b.amount) || 0), 0);
+  const lines = entries.map((e) => {
+    const m = e.m || {};
+    return `- ${(m.alias || m.name) || '未命名卡片'}｜账单 ¥${money(e.b.amount)}｜到期 ${e.b.dueDate}`;
+  });
+  const body = [
+    `- 账单组：${name}（共 ${entries.length} 张卡，合并还款）`,
+    `- 出账月份：${month}`,
+    `- 合计应还：¥${money(total)}`,
+    `- 到期还款日：${entries[0].b.dueDate}${daysLeft < 0 ? `（已逾期 ${Math.abs(daysLeft)} 天）` : ''}`,
+    ...lines,
+    daysLeft < 0 ? '- 状态：**仍未标记为已还**，请尽快处理' : '- 状态：未还',
+  ].join('\n');
+  return { type: 'bill', key: `bill:group:${gid}:${month}:${daysLeft < 0 ? 'overdue' : 'due'}`, title, body };
+}
+
 /** 收集所有待提醒项（不含去重判断）。bills 为账单流水（月账单 + 是否已还） */
 function collectReminders(cards, cfg, now, bills) {
   now = now || new Date();
   const items = [];
   const remainDaysInMonth = daysInMonth(now.getFullYear(), now.getMonth() + 1) - now.getDate();
 
+  // 合并账单组成员索引：同一 billGroupId 的卡在还款/账单提醒上合并为一条
+  const groups = new Map();
+  for (const m of cards || []) {
+    if (!m.billGroupId) continue;
+    if (!groups.has(m.billGroupId)) groups.set(m.billGroupId, []);
+    groups.get(m.billGroupId).push(m);
+  }
+  // 组内按最后还款日排序，取最早的那个作为整组的提醒日；组员还款日由服务端强制一致，
+  // 这里排序只是兜底（数据被手工改脏时宁可早提醒也不能漏提醒）
+  for (const members of groups.values()) {
+    members.sort((a, b) => String((a.payment || {}).lastPayDate || '').localeCompare(String((b.payment || {}).lastPayDate || '')));
+  }
+
   for (const m of cards || []) {
     // ① 年费到期：取「已跨越且最接近」的阈值，每个阈值只提醒一次
+    //    （年费是每张卡独立的，不随合并账单归并）
     if (m.waiver && m.waiver.needsPayment && Number.isFinite(m.feeDays) && m.feeDays >= 0) {
       const applicable = cfg.rules.feeDays.filter((d) => m.feeDays <= d).sort((a, b) => a - b);
       if (applicable.length) items.push(feeItem(m, m.feeDays, applicable[0]));
@@ -174,29 +229,69 @@ function collectReminders(cards, cfg, now, bills) {
       const d = m.payment.payDaysLeft;
       // 跳期后 payDaysLeft 指向下期最后还款日（最长约 2 个月），仅在提醒窗口内触发；
       // 真正「已逾期」的账单由账单流水（billOverdueRemind）负责提醒
-      if (d >= 0 && d <= cfg.rules.repayBeforeDays) items.push(repayItem(m, d));
+      if (d >= 0 && d <= cfg.rules.repayBeforeDays) {
+        const g = m.billGroupId ? groups.get(m.billGroupId) : null;
+        // 组内只由「首位成员」产出合并提醒，其余成员不再单独推送。
+        // 注意不能在这里 continue——下面还有按卡独立的月刷卡任务要处理
+        if (g) {
+          if (g[0].id === m.id) items.push(groupRepayItem(g[0].billGroupId, g[0].billGroupName || '合并账单组', g, d, m.payment.lastPayDate));
+        } else {
+          items.push(repayItem(m, d));
+        }
+      }
     }
-    // ③ 月刷卡任务未达标（月末临近）
+    // ③ 月刷卡任务未达标（月末临近；按卡独立，不合并）
     if (cfg.rules.taskRemainDays > 0 && m.monthlySpendTarget > 0) {
       const gap = Math.max(0, Number(m.monthlySpendTarget) - Number(m.monthSpend || 0));
       if (gap > 0 && remainDaysInMonth <= cfg.rules.taskRemainDays) items.push(taskItem(m, remainDaysInMonth, gap));
     }
   }
-  // ④ 账单流水：未还账单到期前提醒 + 已过到期日仍未还的逾期提醒
+  // ④ 账单流水：未还账单到期前提醒 + 已过到期日仍未还的逾期提醒。
+  //    同组同月合并成一条（组内还款日一致，到期日相同；被手工改脏时取最早那条作为提醒日）
   const byId = new Map((cards || []).map((m) => [m.id, m]));
+  const billBuckets = new Map(); // key: 组 → 月（同组按月归并）；无组时按单张卡
   for (const b of bills || []) {
     if (b.paid === '已还' || !b.dueDate) continue;
     const target = new Date(b.dueDate + 'T00:00:00');
     if (isNaN(target.getTime())) continue;
     const t0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const daysLeft = Math.round((target - t0) / 86400000);
-    if (daysLeft < 0) {
-      if (cfg.rules.billOverdueRemind) items.push(billItem(b, byId.get(b.myCardId), daysLeft));
-    } else if (daysLeft <= cfg.rules.billBeforeDays) {
-      items.push(billItem(b, byId.get(b.myCardId), daysLeft));
+    const overdue = daysLeft < 0;
+    if (overdue ? !cfg.rules.billOverdueRemind : daysLeft > cfg.rules.billBeforeDays) continue;
+
+    const m = byId.get(b.myCardId);
+    const gid = m && m.billGroupId;
+    // 组提醒必须以「卡还在组里」为前提；卡被移出组后其账单恢复逐卡提醒
+    const g = gid ? groups.get(gid) : null;
+    const key = g ? 'G:' + gid + ':' + b.month + ':' + (overdue ? 'o' : 'd') : 'C:' + b.myCardId;
+    let bucket = billBuckets.get(key);
+    if (!bucket) {
+      bucket = { gid: gid || '', month: b.month, overdue, entries: [] };
+      billBuckets.set(key, bucket);
     }
+    bucket.entries.push({ b, m });
+  }
+  for (const bucket of billBuckets.values()) {
+    const g = bucket.gid ? groups.get(bucket.gid) : null;
+    if (!g) {
+      const e = bucket.entries[0];
+      items.push(billItem(e.b, e.m, diffDaysOf(e.b.dueDate, now)));
+      continue;
+    }
+    // 组内成员按到期日升序，取最早者作为整组提醒日
+    bucket.entries.sort((x, y) => String(x.b.dueDate).localeCompare(String(y.b.dueDate)));
+    const earliest = bucket.entries[0];
+    const daysLeft = diffDaysOf(earliest.b.dueDate, now);
+    items.push(groupBillItem(bucket.gid, g[0].billGroupName || '合并账单组', bucket.entries, bucket.month, daysLeft));
   }
   return items;
+}
+
+/** 距今（自然日）天数，用于账单到期判断 */
+function diffDaysOf(dateStr, now) {
+  const t = new Date(String(dateStr) + 'T00:00:00');
+  const t0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((t - t0) / 86400000);
 }
 
 /** 执行检查并推送：去重（同一 key 只推一次）→ 发送 → 记录历史 */

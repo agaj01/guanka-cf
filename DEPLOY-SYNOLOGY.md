@@ -273,8 +273,9 @@ sudo docker run --rm \
 sudo cp -a /volume1/@docker/volumes/guanka-data/_data/. /volume1/docker/backup/guanka-$(date +%Y%m%d)/
 ```
 
-备份出来的就是 5 个 JSON：`cards.json`、`mycards.json`、`consumptions.json`、
-`benefits.json`、`settings.json`（如配了提醒还有 `notify.json`）。
+备份出来的就是这些 JSON：`cards.json`（卡种库）、`mycards.json`（持卡）、`consumptions.json`（消费）、
+`benefits.json`（权益）、`bills.json`（账单流水）、`billGroups.json`（合并账单组）、
+`settings.json`（主题/排序），以及配了提醒后的 `notify.json`。
 
 ### 8.2 恢复
 

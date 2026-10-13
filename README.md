@@ -60,13 +60,15 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 | 卡种数据库 | 列表/新增/编辑/删除；批量导入 CSV；按银行分组收起展开（默认收起） |
 | 导出持卡 | 导出当前持卡对应的卡种信息 CSV（仅 12 项基础信息，不含个人隐私数据） |
 | 主题 | 白色/深色一键切换，选择自动记忆 |
+| 合并账单 | 把还款日相同的多张卡加入同一「账单组」，还款/账单提醒合并为 **1 条**（列出组内各卡与合计应还），不再逐卡刷屏；年费与月刷卡任务仍按卡独立 |
 | 其他 | 卡种库升级自动合并新卡（按 银行+名称+卡组织+等级 去重）；数据原子写入防损坏 |
 
 ## 数据与备份
 
 - 所有数据在 Docker 命名卷 `guanka-data`（容器内 `/app/data`）中，为 JSON 文件：
   `cards.json`（卡种库）、`mycards.json`（持卡）、`consumptions.json`（消费记录）、
-  `benefits.json`（权益记录）、`settings.json`（主题/排序/折叠状态）。
+  `benefits.json`（权益记录）、`bills.json`（账单流水）、`billGroups.json`（合并账单组）、
+  `notify.json`（提醒配置，仅在配置过时生成）、`settings.json`（主题/排序/折叠状态）。
 - 备份：`docker run --rm -v guanka-data:/data -v %cd%:/backup alpine tar czf /backup/guanka-backup.tar.gz -C /data .`
   （PowerShell 中 `%cd%` 换成 `$(pwd)` 或绝对路径）
 - 恢复：把备份解压到卷对应目录即可；或直接把宿主机目录挂载为卷：
@@ -110,6 +112,28 @@ services:
 - 去重：同一提醒（卡 + 周期 + 阈值）只推一次，避免刷屏
 - 单通道失败不影响其余通道，失败原因记在「最近推送记录」里
 - 手动验证：设置页可「发送测试」与「立即检查」；也可 `curl -X POST http://localhost:3000/api/notify/check`
+
+## 合并账单（多卡共用一次提醒）
+
+同一家银行的多张卡常常共用还款日，逐卡提醒会很吵。把这几张卡加进同一个**账单组**后：
+
+- **还款提醒合并为 1 条**：标题如「还款提醒」招行合并还款 3 天后到期（3 张卡合并）」，正文列出每张卡与银行到期日
+- **账单流水提醒同样合并**：同一组同一出账月的未还账单聚成一条，给出**合计应还**与最晚到期日
+- **年费提醒、月刷卡任务不合并**：这两类本就按卡独立（年费金额与刷卡任务互不相干）
+
+**组内必须同还款日**（v1 策略）：建组/改组/编辑持卡时会校验，还款节奏不一致直接拒绝并提示是哪两张卡冲突。
+判定不只是比当天日期，而是按未来 14 个月逐月推算「最后还款日」——`每月固定日 5 号` 与 `账单日后 4 天`
+可能在某个月恰好同一天，换月就错开，这种组合会被正确识别为不一致。还款方式、账单日、宽限期任一项不同也算不一致。
+
+**用法**
+
+1. 持卡列表工具栏点「合并账单」→ 填组名 → 勾选成员（至少 2 张，已在其他组的卡会自动置灰）→ 新建
+2. 或在「编辑持卡」里用「合并账单组」下拉把单张卡加入/移出已有组（只列出还款日匹配的组）
+3. 持卡行会显示「合并账单 · 组名」徽章；抽屉里可看到组内成员与按月合计，也可一键「退出合并账单」
+4. 解散组、删光组内成员时组会自动清理，不会留下僵尸组
+
+> 数据存于 `billGroups.json`（仅组名），成员关系记在每张持卡的 `billGroupId` 上——单一事实来源，
+> 不会出现两处不一致。组内成员不足 2 张或组不存在时，持卡的引用会在启动时自动清空。
 
 ## 还款与账单（宽限期 / 账单流水）
 
@@ -170,8 +194,8 @@ DATA_DIR=./data node server/index.js
 | 脚本 | 覆盖范围 | 断言数 |
 |------|---------|--------|
 | `tools/dates-test.js` | 日期引擎：账单/还款日推导、宽限期选期、预警分级、跨年闰日钳制 | 39 |
-| `tools/notify-test.js` | 提醒引擎：三通道推送、去重、年费达标判定、权益生命周期与接口边界 | 70 |
-| `tools/ui-test.js` | 前端逻辑：页面渲染、抽屉、记一笔、补录、权益超限拦截、编辑持卡、卡种库、主题切换 | 52 |
+| `tools/notify-test.js` | 提醒引擎：三通道推送、去重、年费达标判定、权益生命周期与接口边界、**合并账单组（建组/日期一致性/按组合并/解散清理）** | 107 |
+| `tools/ui-test.js` | 前端逻辑：页面渲染、抽屉、记一笔、补录、权益超限拦截、编辑持卡、卡种库、主题切换、**合并账单组交互** | 65 |
 
 ```bash
 node tools/dates-test.js             # 纯逻辑，直接跑
@@ -181,6 +205,9 @@ npm i -g jsdom                       # ui-test 需要 jsdom
 node server/index.js &               # 先起服务
 NODE_PATH=<jsdom所在node_modules> node tools/ui-test.js
 ```
+
+> `ui-test` 默认连 `localhost:3000`，端口不同时用 `TEST_PORT=3311` 指定。
+> 三套脚本结尾都会打印「通过 N/M 项」，便于直接核对断言总数。
 
 ## API 摘要
 
@@ -202,6 +229,11 @@ NODE_PATH=<jsdom所在node_modules> node tools/ui-test.js
 | POST | /api/mycards/:id/benefits/:idx/usage | 权益记一笔 |
 | POST | /api/mycards/:id/benefits/:idx/count | 权益补录次数 |
 | GET | /api/mycards/:id/benefits/:idx/history | 权益周期历史 |
+| GET/POST | /api/bills | 账单流水查询/新增 |
+| PUT/DELETE | /api/bills/:id | 账单标记已还/删除 |
+| POST | /api/mycards/:id/bills/generate | 生成本期账单 |
+| GET/POST | /api/billgroups | 合并账单组查询/新建（校验组内同还款日） |
+| PUT/DELETE | /api/billgroups/:id | 改组名与成员/解散组 |
 | POST | /api/mycards/:id/points | 积分抵扣开关 |
 | POST | /api/mycards/:id/asset | 资产达标开关 |
 | POST | /api/shutdown | 优雅退出（数据安全落盘） |

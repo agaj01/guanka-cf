@@ -81,6 +81,7 @@ const state = {
   myCards: [],
   cards: [],
   bills: [],
+  billGroups: [],
   stats: null,
   drawerId: null,
   filter: 'all',
@@ -106,6 +107,7 @@ async function loadAll() {
   state.meta = meta;
   state.myCards = mycardsResp.data || mycardsResp;
   state.stats = mycardsResp.stats || (await api('/api/stats'));
+  state.billGroups = mycardsResp.billGroups || [];
   state.cards = cards;
   state.bills = bills || [];
   applyTheme(settings.theme || 'light');
@@ -166,6 +168,7 @@ function renderMyCards() {
     '</div>' +
     '<div class="toolbar">' +
     '<button class="btn primary" id="btn-add-card">＋ 添加持卡</button>' +
+    '<button class="btn" id="btn-billgroups">合并账单</button>' +
     '<button class="btn" id="btn-export">导出持卡</button>' +
     '<select id="filter-select" class="filter-select">' +
     option('all', '全部卡片', true) + option('repay', '本月需还款', true) + option('fee', '年费临近(30天)', true) +
@@ -248,8 +251,11 @@ function statCard(label, value, sub, warn, id) {
 
 function cardRowHtml(m) {
   const p = m.payment || {};
+  const groupBadge = m.billGroupId
+    ? '<span class="badge badge-purple" title="已合并账单：还款提醒只推 1 条">合并账单 · ' + esc(m.billGroupName || '未命名组') + '</span>'
+    : '';
   return '<div class="card-row" data-id="' + m.id + '">' +
-    '<div><div class="card-name">' + esc(m.name) + (m.alias ? '<span class="alias">“' + esc(m.alias) + '”</span>' : '') + '</div>' +
+    '<div><div class="card-name">' + esc(m.name) + (m.alias ? '<span class="alias">“' + esc(m.alias) + '”</span>' : '') + (groupBadge ? ' ' + groupBadge : '') + '</div>' +
     '<div class="card-sub">' + esc(m.bank) + ' · ' + esc(m.org) + ' · ' + esc(m.level) + ' · 额度 ' + fmtMoney(m.creditLimit) + (m.last4 ? ' · 尾号 ' + esc(m.last4) : '') + '</div>' +
     '<div class="card-sub">还款 ' + esc(p.dueDate || '—') + (p.lastPayDate && p.lastPayDate !== p.dueDate ? '（最晚 ' + esc(p.lastPayDate) + '）' : '') + ' · 账单日 ' + (m.billingDay || '—') + '</div></div>' +
     '<div class="waiver-cell">' + waiverCellHtml(m) + '</div>' +
@@ -381,6 +387,8 @@ function bindPageEvents() {
   if (addBtn) addBtn.addEventListener('click', openAddCardModal);
   const expBtn = $('#btn-export', app);
   if (expBtn) expBtn.addEventListener('click', exportCards);
+  const bgBtn = $('#btn-billgroups', app);
+  if (bgBtn) bgBtn.addEventListener('click', openBillGroupsModal);
 
   const filterSel = $('#filter-select', app);
   if (filterSel) filterSel.addEventListener('change', (e) => { state.filter = e.target.value; render(); });
@@ -573,6 +581,118 @@ async function openNotifyModal() {
   });
 }
 
+// ---------- 弹窗：合并账单组管理 ----------
+// 组本身只存名称，成员关系记在每张卡的 billGroupId 上（服务端强制组内同还款日）
+async function openBillGroupsModal(focusGid) {
+  const groups = state.billGroups || [];
+  const cards = state.myCards || [];
+  const memberNames = (g) => cards.filter((x) => x.billGroupId === g.id).map((x) => esc(x.alias || x.name));
+
+  let html = '<div style="font-size:13px;color:var(--text-2);line-height:1.6;margin-bottom:12px">' +
+    '把<b>还款日相同</b>的几张卡加入同一组，还款提醒就会合并成 <b>1 条</b>（列出组内所有卡与银行到期日），不再逐卡重复推送。<br>' +
+    '年费提醒、月刷卡任务仍按单卡推送（这两类卡片之间本就独立）。</div>';
+
+  if (groups.length) {
+    html += groups.map((g) => {
+      const names = memberNames(g);
+      return '<div class="bg-group" data-gid="' + esc(g.id) + '">' +
+        '<div class="bg-head"><span class="bg-name">' + esc(g.name) + '</span>' +
+        '<span class="badge badge-purple">' + g.memberCount + ' 张卡</span>' +
+        (g.lastPayDate ? '<span class="badge badge-default">最后还款日 ' + esc(g.lastPayDate) + '</span>' : '') +
+        '<div class="spacer" style="flex:1"></div>' +
+        '<button class="btn small" data-act="bg-edit">编辑</button> ' +
+        '<button class="btn small danger" data-act="bg-del">解散</button></div>' +
+        '<div class="chip-row" style="margin-top:6px">' + (names.length ? names.map((n) => '<span class="stat-chip">' + n + '</span>').join('') : '<span style="font-size:12px;color:var(--text-3)">暂无成员</span>') + '</div>' +
+        '</div>';
+    }).join('');
+  } else {
+    html += '<div class="empty-tip" style="padding:16px">还没有合并账单组，点下面按钮新建</div>';
+  }
+
+  html += '<div id="bg-new" style="margin-top:14px">' +
+    '<label style="font-size:12px;color:var(--text-2)">新建账单组</label>' +
+    '<div class="form-grid" style="margin-top:6px">' +
+    field('组名称', '<input id="bg-name" placeholder="如 招行合并还款">') +
+    '</div>' +
+    '<div style="margin-top:8px"><label style="font-size:12px;color:var(--text-2)">选择成员（至少 2 张，需同还款日）</label>' +
+    '<div id="bg-members">' + memberChecklistHtml([]) + '</div></div>' +
+    '</div>';
+
+  openModal('<div class="modal-title">合并账单组</div>', html,
+    '<button class="btn" data-close>关闭</button><button class="btn primary" id="bg-create">新建账单组</button>');
+
+  const modal = $('.modal-body');
+  $$('.bg-group', modal).forEach((el) => {
+    const gid = el.dataset.gid;
+    $('[data-act="bg-del"]', el).addEventListener('click', async () => {
+      if (!(await confirmDialog('解散该组后，组内卡将恢复各自提醒。确定解散？'))) return;
+      try {
+        await api('/api/billgroups/' + gid, { method: 'DELETE' });
+        toast('已解散');
+        closeModal();
+        await loadAll();
+        openBillGroupsModal();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+    $('[data-act="bg-edit"]', el).addEventListener('click', () => openBillGroupEditModal(gid));
+  });
+  $('#bg-create').addEventListener('click', async () => {
+    const name = $('#bg-name').value.trim();
+    if (!name) return toast('请填写组名称', 'error');
+    const memberIds = $$('#bg-members input:checked').map((x) => x.value);
+    if (memberIds.length < 2) return toast('至少选择 2 张卡', 'error');
+    try {
+      await api('/api/billgroups', { method: 'POST', body: { name, memberIds } });
+      toast('账单组已创建');
+      closeModal();
+      await loadAll();
+      openBillGroupsModal();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+  if (focusGid) {
+    const el = modal.querySelector('.bg-group[data-gid="' + focusGid + '"]');
+    if (el) el.scrollIntoView({ block: 'center' });
+  }
+}
+
+/** 成员勾选列表：已属其他组的卡置灰并说明原因，避免误选 */
+function memberChecklistHtml(checkedIds) {
+  const groups = state.billGroups || [];
+  return (state.myCards || []).map((m) => {
+    const g = groups.find((x) => x.id === m.billGroupId);
+    const label = (m.alias || m.name) + ' · ' + m.bank + ' · 还款 ' + ((m.payment && m.payment.lastPayDate) || '—');
+    const disabled = g ? ' disabled' : '';
+    const tag = g ? '（已在「' + esc(g.name) + '」）' : '';
+    return '<label class="bg-member"><input type="checkbox" value="' + esc(m.id) + '"' + disabled +
+      (checkedIds.includes(m.id) ? ' checked' : '') + '> <span>' + esc(label) + '</span>' +
+      '<span style="color:var(--text-3);font-size:12px">' + tag + '</span></label>';
+  }).join('');
+}
+
+async function openBillGroupEditModal(gid) {
+  const g = (state.billGroups || []).find((x) => x.id === gid);
+  if (!g) return;
+  const my = (state.myCards || []).filter((x) => x.billGroupId === gid).map((x) => x.id);
+  openModal('<div class="modal-title">编辑账单组 — ' + esc(g.name) + '</div>',
+    '<div class="form-grid">' + field('组名称', '<input id="bg-name" value="' + esc(g.name) + '">') + '</div>' +
+    '<div style="margin-top:10px"><label style="font-size:12px;color:var(--text-2)">成员（取消勾选可移出该组）</label>' +
+    '<div id="bg-members">' + memberChecklistHtml(my) + '</div></div>',
+    '<button class="btn" data-close>取消</button><button class="btn primary" id="bg-save">保存</button>');
+  $('#bg-save').addEventListener('click', async () => {
+    const name = $('#bg-name').value.trim();
+    if (!name) return toast('请填写组名称', 'error');
+    const memberIds = $$('#bg-members input:checked').map((x) => x.value);
+    if (memberIds.length === 1) return toast('账单组至少需要 2 张卡，可改为解散该组', 'error');
+    try {
+      await api('/api/billgroups/' + gid, { method: 'PUT', body: { name, memberIds } });
+      toast('已保存');
+      closeModal();
+      await loadAll();
+      openBillGroupsModal(memberIds.length ? gid : undefined);
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
 // ---------- 抽屉：持卡详情 ----------
 function openDrawer(id) {
   state.drawerId = id;
@@ -601,8 +721,11 @@ function renderDrawer() {
   drawer.innerHTML = drawerHtml(m);
   drawer.scrollTop = prevScroll;
   requestAnimationFrame(() => {
-    $('.overlay', root).classList.add('show');
-    drawer.classList.add('show');
+    // rAF 是异步的：这一帧之间可能已经 closeDrawer / 切页（root 被清空），
+    // 不做存在性判断会直接抛 TypeError 打断后续渲染
+    const ov = $('.overlay', root);
+    if (ov) ov.classList.add('show');
+    if (drawer.isConnected) drawer.classList.add('show');
   });
   bindDrawerEvents(m);
 }
@@ -647,6 +770,9 @@ function drawerHtml(m) {
     infoItem('还款方式', m.repayMode === 'afterBill' ? '账单日后 ' + (m.repayValue || 0) + ' 天' : '每月 ' + (m.repayValue || m.repaymentDay || '—') + ' 日') +
     infoItem('宽限期', (m.graceDays || 0) + ' 天') +
     infoItem('最长免息期', (m.payment && m.payment.maxInterestDays) ? m.payment.maxInterestDays + ' 天' : '—') +
+    infoItem('合并账单', m.billGroupId
+      ? '<span class="badge badge-purple">' + esc(m.billGroupName || '未命名组') + '</span> <span style="font-size:12px;color:var(--text-3)">' + groupMembersOf(m).length + ' 张卡</span>'
+      : '<span style="color:var(--text-3)">未合并</span>') +
     '</div>' +
     '<div class="bill-hint">本期账单 ' + esc((m.payment && m.payment.billDate) || '—') + ' · 银行到期 ' + esc((m.payment && m.payment.dueDate) || '—') +
     ((m.payment && m.payment.isInGrace) ? ' <span class="badge badge-yellow">宽限期内</span>' : '') +
@@ -698,6 +824,8 @@ function drawerHtml(m) {
     '</div>' +
     billsHtml(m) + '</div>' +
 
+    (m.billGroupId ? groupBillsSectionHtml(m) : '') +
+
     '<div class="drawer-section"><h3>权益使用明细</h3>' +
     (benefitsHtml || '<div style="font-size:13px;color:var(--text-3)">暂无权益（编辑持卡可添加）</div>') +
     '</div>' +
@@ -709,8 +837,56 @@ function infoItem(k, v) {
   return '<div class="info-item"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
 }
 
+/** 合并账单组视角：组内成员 + 按月合计（还款提醒按组只推 1 条） */
+function groupBillsSectionHtml(m) {
+  const members = groupMembersOf(m);
+  const rows = groupBillRows(m);
+  const memberHtml = members.map((x) => '<span class="stat-chip">' + esc(x.alias || x.name) +
+    (x.id === m.id ? '<span style="color:var(--text-3)">（当前）</span>' : '') + '</span>').join('');
+  return '<div class="drawer-section"><h3>合并账单组：' + esc(m.billGroupName || '未命名组') + '</h3>' +
+    '<div class="bill-hint">组内 ' + members.length + ' 张卡共用同一还款日，' +
+    '提醒按组合并为 1 条（不再逐卡推送）。组内卡的最后还款日：' + esc((m.payment && m.payment.lastPayDate) || '—') + '</div>' +
+    '<div class="chip-row">' + memberHtml + '</div>' +
+    (rows.length
+      ? '<table class="record-table"><thead><tr><th>月份</th><th>合计应还</th><th>到期日</th><th>未还</th></tr></thead><tbody>' +
+        rows.map((r) => '<tr><td>' + esc(r.month) + '</td>' +
+          '<td class="amount">' + fmtMoney(r.total) + '</td>' +
+          '<td>' + esc(r.dueDate || '—') + '</td>' +
+          '<td>' + (r.unpaid ? '<span class="badge badge-red">' + r.unpaid + ' 笔</span>' : '<span class="badge badge-green">已还清</span>') + '</td></tr>').join('') +
+        '</tbody></table>'
+      : '<div style="font-size:13px;color:var(--text-3)">组内暂无账单记录</div>') +
+    '<div style="margin-top:10px;display:flex;gap:8px">' +
+    '<button class="btn small" data-act="group-edit" data-gid="' + esc(m.billGroupId) + '">管理账单组</button>' +
+    '<button class="btn small" data-act="group-leave" data-id="' + m.id + '">退出合并账单</button>' +
+    '</div></div>';
+}
+
 function myBills(m) {
   return (state.bills || []).filter((b) => b.myCardId === m.id).sort((a, b) => (a.month < b.month ? 1 : -1));
+}
+
+function groupMembersOf(m) {
+  if (!m.billGroupId) return [];
+  return (state.myCards || []).filter((x) => x.billGroupId === m.billGroupId);
+}
+
+// 合并账单组：同月账单合计（组内还款日一致，到期日应相同）
+function groupBillRows(m) {
+  const members = groupMembersOf(m);
+  if (!members.length) return [];
+  const ids = members.map((x) => x.id);
+  const byMonth = {};
+  for (const b of state.bills || []) {
+    if (!ids.includes(b.myCardId)) continue;
+    const e = byMonth[b.month] || (byMonth[b.month] = { month: b.month, total: 0, unpaid: 0, count: 0, dueDate: '', paidDate: '' });
+    e.total += Number(b.amount) || 0;
+    e.count++;
+    if (b.paid !== '已还') e.unpaid++;
+    // 到期日取最早（组内不一致时宁可提前提醒）
+    if (b.dueDate && (!e.dueDate || b.dueDate < e.dueDate)) e.dueDate = b.dueDate;
+    if (b.paidDate && (!e.paidDate || b.paidDate > e.paidDate)) e.paidDate = b.paidDate;
+  }
+  return Object.values(byMonth).sort((a, b) => (a.month < b.month ? 1 : -1));
 }
 
 function unpaidCount(m) {
@@ -865,6 +1041,19 @@ function bindDrawerEvents(m) {
     });
   });
 
+  // 合并账单组
+  const grpEdit = $('[data-act="group-edit"]', drawer);
+  if (grpEdit) grpEdit.addEventListener('click', () => openBillGroupsModal(grpEdit.dataset.gid));
+  const grpLeave = $('[data-act="group-leave"]', drawer);
+  if (grpLeave) grpLeave.addEventListener('click', async () => {
+    if (!(await confirmDialog('退出后这张卡将恢复单独提醒，确定退出合并账单？'))) return;
+    try {
+      await api('/api/mycards/' + m.id, { method: 'PUT', body: { billGroupId: '' } });
+      toast('已退出合并账单');
+      await loadAll();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+
   // 权益
   $$('.benefit-block', drawer).forEach((block) => {
     const idx = +block.dataset.idx;
@@ -995,6 +1184,7 @@ function myCardFormHtml(c, m) {
     field('年费收取日（1-31）', '<input id="f-feeday" type="number" min="1" max="31" value="' + (m ? m.feeDay : 1) + '">') +
     field('已达标年份（手工，选填）', '<input id="f-waivedyear" type="number" min="0" value="' + (m ? (m.waivedYear || 0) : 0) + '" title="填当前年份表示手工声明本年已达标/已减免">') +
     field('已刷核定期（选填）', '<input id="f-countperiod" type="number" min="0" value="' + (m ? (m.countPeriodYear || 0) : 0) + '" title="填年份表示已刷数据统计到该年，跨年后自动失效">') +
+    field('合并账单组', groupSelectHtml(m)) +
     '</div>' +
     '<div style="margin-top:12px"><label style="font-size:12px;color:var(--text-2)">权益（名称 / 总次数 / 重置周期）</label>' +
     '<div id="benefit-rows">' + bens.map((b, i) => benefitEditRow(b, i)).join('') + '</div>' +
@@ -1002,8 +1192,32 @@ function myCardFormHtml(c, m) {
   );
 }
 
-function benefitEditRow(b, i) {
-  const cycles = state.meta.resetCycles || [];
+/** 合并账单组下拉：空 = 不合并；只列出「与本卡还款日一致」或「尚无成员」的组 */
+function groupSelectHtml(m) {
+  const cur = (m && m.billGroupId) || '';
+  const opts = ['<option value="">不合并（单独提醒）</option>'];
+  for (const g of state.billGroups || []) {
+    if (g.id === cur) { opts.push('<option value="' + esc(g.id) + '" selected>' + esc(g.name) + '</option>'); continue; }
+    // 已有成员的组：还款日不一致的不列出来，避免选完才被服务端拒绝
+    if (g.memberCount > 0 && !sameRepayAsGroup(m, g)) continue;
+    opts.push('<option value="' + esc(g.id) + '">' + esc(g.name) + '（' + g.memberCount + ' 张）</option>');
+  }
+  return '<select id="f-billgroup">' + opts.join('') + '</select>';
+}
+
+/** 前端预判：本卡与组内首个成员的还款节奏是否一致（最终以服务端校验为准） */
+function sameRepayAsGroup(m, g) {
+  if (!m) return g.memberCount === 0;
+  const peer = (state.myCards || []).find((x) => x.billGroupId === g.id);
+  if (!peer || !m.payment || !peer.payment) return g.memberCount === 0;
+  // 组内一致性由「最后还款日 + 还款方式 + 账单日 + 宽限期」共同决定，任一项不同即视为不一致
+  return m.payment.lastPayDate === peer.payment.lastPayDate
+    && (m.repayMode || 'fixed') === (peer.repayMode || 'fixed')
+    && Number(m.billingDay) === Number(peer.billingDay)
+    && Number(m.graceDays || 0) === Number(peer.graceDays || 0);
+}
+
+function benefitEditRow(b, i) {  const cycles = state.meta.resetCycles || [];
   const types = state.meta.benefitTypes || [];
   return '<div class="benefit-row" data-i="' + i + '" data-bid="' + esc(b.id || '') + '">' +
     '<input class="b-name" placeholder="权益名称" value="' + esc(b.name) + '">' +
@@ -1063,6 +1277,7 @@ async function saveMyCard(selected, editing) {
     feeDay: $('#f-feeday', form).value,
     waivedYear: ($('#f-waivedyear', form) && $('#f-waivedyear', form).value) || 0,
     countPeriodYear: ($('#f-countperiod', form) && $('#f-countperiod', form).value) || 0,
+    billGroupId: ($('#f-billgroup', form) && $('#f-billgroup', form).value) || '',
     benefits: collectBenefits(form),
   };
   try {

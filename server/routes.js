@@ -10,6 +10,64 @@ const D = require('./dates');
 // 账单流水（月账单 + 是否已还）
 function getBills() { return store.read('bills', []); }
 
+// ---------- 合并账单组 ----------
+// 组本身只存 id + 名称，成员关系记在 mycards[].billGroupId —— 单一事实来源，
+// 删卡/改组不会留下需要两头维护的孤儿成员表。
+function getBillGroups() { return store.read('billGroups', []); }
+
+function groupNameOf(groupId) {
+  if (!groupId) return '';
+  const g = getBillGroups().find((x) => x.id === groupId);
+  return g ? g.name : '';
+}
+
+/**
+ * 组内「最后还款日」一致性校验（策略③：组内强制同还款日）
+ * 只比当期是不够的——fixed(20) 与 afterBill(N) 可能在某个账单周期恰好落在同一天，
+ * 换个月就错开。这里按未来 14 个月 × 每月 10 个采样日逐一推算「最后还款日」，
+ * 只有全部一致才判定为同一还款节奏（覆盖月末钳制与跨年闰日的分支）。
+ */
+const REPAY_PROBE_DAYS = [1, 5, 10, 15, 20, 25, 28, 29, 30, 31];
+function sameRepaySchedule(a, b, now) {
+  if (a === b) return true;
+  const base = now || new Date();
+  for (let i = 0; i < 14; i++) {
+    for (const d of REPAY_PROBE_DAYS) {
+      const probe = new Date(base.getFullYear(), base.getMonth() + i, d);
+      if (D.paymentInfo(a, probe).lastPayDate !== D.paymentInfo(b, probe).lastPayDate) return false;
+    }
+  }
+  return true;
+}
+
+/** 校验把 target 放入 groupId 是否合法；返回错误文案，合法则返回 '' */
+function groupAssignError(myCards, target, groupId, now) {
+  if (!groupId) return '';
+  if (!getBillGroups().some((g) => g.id === groupId)) return '合并账单组不存在';
+  for (const other of myCards) {
+    if (other.id === target.id || other.billGroupId !== groupId) continue;
+    if (!sameRepaySchedule(other, target, now)) {
+      return '与「' + (other.alias || other.name) + '」的最后还款日不一致，无法合并（组内卡必须同还款日）';
+    }
+  }
+  return '';
+}
+
+// 迁移/自愈：清掉指向已不存在账单组的悬空引用；成员被删空后解散空组
+function cleanBillGroups() {
+  const groups = getBillGroups();
+  const ids = new Set(groups.map((g) => g.id));
+  const myCards = getMyCards();
+  let changed = false;
+  for (const m of myCards) {
+    if (m.billGroupId && !ids.has(m.billGroupId)) { m.billGroupId = ''; changed = true; }
+  }
+  if (changed) store.write('mycards', myCards);
+  const alive = new Set(myCards.map((m) => m.billGroupId).filter(Boolean));
+  const kept = (Array.isArray(groups) ? groups : []).filter((g) => alive.has(g.id));
+  if (kept.length !== (Array.isArray(groups) ? groups.length : 0)) store.write('billGroups', kept);
+}
+
 // 年费达标状态（金山口径：无年费 / 手工声明 / 自动判定）
 // ws 必须由调用方传入 waiverState() 的结果——原始持卡记录上没有 waiver 字段（那是 computeMyCard 的计算输出），
 // 之前直接读 mc.waiver 恒为 {}，导致免年费/刷免达标一律误报「未达标」
@@ -62,6 +120,9 @@ function init(s) {
   store.read('consumptions', []);
   store.read('benefits', []);
   store.read('settings', { theme: 'light', bankOrder: [], banksCollapsed: {}, cardBanksCollapsed: {} });
+  store.read('billGroups', []);
+  // 历史数据自愈：持卡上可能残留指向已删组的引用
+  cleanBillGroups();
   migrateBenefitIds();
 }
 
@@ -238,6 +299,9 @@ function computeMyCard(mc, now, idx) {
     feeStatus,
     feeAlert,
     feeMonthsLeft,
+    // 合并账单：组名 + 组内是否为首位成员（负责汇总提醒），无组时为空
+    billGroupId: mc.billGroupId || '',
+    billGroupName: groupNameOf(mc.billGroupId),
     recent: recs.amount.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 5),
     monthSpend, yearSpend, totalSpend: recs.amount.reduce((s, r) => s + (Number(r.amount) || 0), 0),
     monthCount: recs.amount.filter((r) => r.date >= monthStart).length,
@@ -385,6 +449,10 @@ function matchRoute(method, pathname) {
     ['POST', /^\/api\/bills$/],
     ['PUT', /^\/api\/bills\/([^/]+)$/],
     ['DELETE', /^\/api\/bills\/([^/]+)$/],
+    ['GET', /^\/api\/billgroups$/],
+    ['POST', /^\/api\/billgroups$/],
+    ['PUT', /^\/api\/billgroups\/([^/]+)$/],
+    ['DELETE', /^\/api\/billgroups\/([^/]+)$/],
     ['POST', /^\/api\/mycards\/([^/]+)\/bills\/generate$/],
     ['POST', /^\/api\/shutdown$/],
   ];
@@ -501,7 +569,12 @@ async function handle(method, pathname, url, body) {
     const idx = buildIndexes();
     const data = getMyCards().map((m) => computeMyCard(m, now, idx));
     // 与统计合并返回，复用已计算的持卡列表（此前 computeStats 内部对每张卡再跑一遍完整计算，全量开销翻倍）
-    return json({ data, stats: computeStats(now, idx, data), banks: [...new Set(data.map((m) => m.bank))] });
+    return json({
+      data,
+      stats: computeStats(now, idx, data),
+      banks: [...new Set(data.map((m) => m.bank))],
+      billGroups: getBillGroups(),
+    });
   }
   if (pathname === '/api/mycards' && method === 'POST') {
     const b = body || {};
@@ -536,8 +609,12 @@ async function handle(method, pathname, url, body) {
       benefits: normalizeBenefits(b.benefits, card.benefits),
       pointsDeducted: false, pointsDeductDate: null,
       assetWaived: false, assetWaivedDate: null,
+      billGroupId: String(b.billGroupId || ''),
       createdAt: now.toISOString(),
     };
+    // 合并账单：组内必须同一还款节奏（策略③），任何一张卡改还款方式都不得破坏组
+    const gErr = groupAssignError(getMyCards(), mc, mc.billGroupId, now);
+    if (gErr) return err(gErr);
     const myCards = getMyCards();
     myCards.push(mc);
     store.write('mycards', myCards);
@@ -573,7 +650,12 @@ async function handle(method, pathname, url, body) {
       feeDay: fee.d,
       last4: b.last4 != null ? String(b.last4).replace(/\D/g, '').slice(0, 4) : cur.last4,
       monthlySpendTarget: b.monthlySpendTarget != null ? nonNeg(b.monthlySpendTarget, 0) : cur.monthlySpendTarget,
+      billGroupId: b.billGroupId != null ? String(b.billGroupId) : (cur.billGroupId || ''),
     };
+    // 合并账单一致性（策略③）：无论是改本卡还款日、还是把卡挪进/挪出某个组，
+    // 都要以「改完之后」的状态重新校验，避免组内出现两个还款节奏
+    const gErr = groupAssignError(myCards.filter((x) => x.id !== cur.id).concat([updated]), updated, updated.billGroupId, now);
+    if (gErr) return err(gErr);
     if (b.benefits !== undefined) {
       updated.benefits = normalizeBenefits(b.benefits, []);
       // 权益被移除后，其使用记录按 id 归属已无人可展示（历史与次数都查不到），
@@ -593,6 +675,8 @@ async function handle(method, pathname, url, body) {
     store.write('mycards', myCards.filter((m) => m.id !== mcMatch[1]));
     store.write('consumptions', getConsumptions().filter((r) => r.myCardId !== mcMatch[1]));
     store.write('benefits', getBenefits().filter((r) => r.myCardId !== mcMatch[1]));
+    // 删掉的是组内最后一张卡时，组本身已无意义（成员关系记在卡上，空组不会自动消失）
+    cleanBillGroups();
     return json({ ok: true });
   }
 
@@ -723,6 +807,100 @@ async function handle(method, pathname, url, body) {
     store.write('benefits', recs);
     return json({ ok: true, used: st.used + count, total: st.total }, 201);
   }
+  // ---- 合并账单组（CRUD）----
+  if (pathname === '/api/billgroups' && method === 'GET') {
+    const myCards = getMyCards();
+    const groups = getBillGroups().map((g) => {
+      const members = myCards.filter((m) => m.billGroupId === g.id);
+      return {
+        ...g,
+        memberIds: members.map((m) => m.id),
+        memberCount: members.length,
+        // 组内统一还款节奏（成员必然一致，否则组无法建立）；空组回退显示为空
+        lastPayDate: members.length ? D.paymentInfo(members[0], now).lastPayDate : '',
+      };
+    });
+    return json(groups);
+  }
+  if (pathname === '/api/billgroups' && method === 'POST') {
+    const b = body || {};
+    const name = String(b.name || '').trim();
+    if (!name) return err('请填写账单组名称');
+    const groups = getBillGroups();
+    if (groups.some((g) => g.name === name)) return err('已存在同名账单组');
+    const ids = Array.isArray(b.memberIds) ? b.memberIds.map(String) : [];
+    const myCards = getMyCards();
+    const picked = [];
+    for (const id of ids) {
+      const m = myCards.find((x) => x.id === id);
+      if (!m) return err('持卡不存在: ' + id, 404);
+      if (picked.some((x) => x.id === id)) continue;
+      picked.push(m);
+    }
+    if (picked.length < 2) return err('账单组至少需要 2 张卡');
+    // 组内两两校验还款节奏一致（策略③）
+    for (let i = 1; i < picked.length; i++) {
+      if (!sameRepaySchedule(picked[0], picked[i], now)) {
+        return err('「' + (picked[i].alias || picked[i].name) + '」与「' + (picked[0].alias || picked[0].name) + '」的最后还款日不一致，无法合并（组内卡必须同还款日）');
+      }
+    }
+    const g = { id: U.uid(), name, createdAt: now.toISOString() };
+    groups.push(g);
+    store.write('billGroups', groups);
+    for (const m of picked) m.billGroupId = g.id;
+    store.write('mycards', myCards);
+    return json(g, 201);
+  }
+  const bgMatch = pathname.match(/^\/api\/billgroups\/([^/]+)$/);
+  if (bgMatch && method === 'PUT') {
+    const groups = getBillGroups();
+    const i = groups.findIndex((g) => g.id === bgMatch[1]);
+    if (i < 0) return err('账单组不存在', 404);
+    const b = body || {};
+    const name = String(b.name != null ? b.name : groups[i].name).trim();
+    if (!name) return err('请填写账单组名称');
+    if (groups.some((g, k) => k !== i && g.name === name)) return err('已存在同名账单组');
+    const myCards = getMyCards();
+    if (Array.isArray(b.memberIds)) {
+      const ids = b.memberIds.map(String);
+      const picked = [];
+      for (const id of ids) {
+        const m = myCards.find((x) => x.id === id);
+        if (!m) return err('持卡不存在: ' + id, 404);
+        if (!picked.some((x) => x.id === id)) picked.push(m);
+      }
+      if (picked.length && picked.length < 2) return err('账单组至少需要 2 张卡');
+      for (let k = 1; k < picked.length; k++) {
+        if (!sameRepaySchedule(picked[0], picked[k], now)) {
+          return err('「' + (picked[k].alias || picked[k].name) + '」与「' + (picked[0].alias || picked[0].name) + '」的最后还款日不一致，无法合并（组内卡必须同还款日）');
+        }
+      }
+      const set = new Set(picked.map((m) => m.id));
+      for (const m of myCards) {
+        if (m.billGroupId === groups[i].id && !set.has(m.id)) m.billGroupId = '';
+        else if (set.has(m.id)) m.billGroupId = groups[i].id;
+      }
+      store.write('mycards', myCards);
+    }
+    groups[i] = { ...groups[i], name };
+    store.write('billGroups', groups);
+    // 成员被清空（memberIds 提交 []）时组随之解散，避免留下无成员的僵尸组
+    cleanBillGroups();
+    return json(groups[i]);
+  }
+  if (bgMatch && method === 'DELETE') {
+    const groups = getBillGroups();
+    if (!groups.some((g) => g.id === bgMatch[1])) return err('账单组不存在', 404);
+    const myCards = getMyCards();
+    let changed = false;
+    for (const m of myCards) {
+      if (m.billGroupId === bgMatch[1]) { m.billGroupId = ''; changed = true; }
+    }
+    if (changed) store.write('mycards', myCards);
+    store.write('billGroups', groups.filter((g) => g.id !== bgMatch[1]));
+    return json({ ok: true });
+  }
+
   // ---- 账单流水（月账单 + 是否已还）----
   if (pathname === '/api/bills' && method === 'GET') {
     const q = url.searchParams;
@@ -980,5 +1158,5 @@ function syncMyCardSnapshots() {
 
 module.exports = {
   init, handle, runNotifyChecks,
-  _internals: { computeMyCard, computeStats, benefitUsed, benefitHistory, waiverState, normalizeCard, normalizeBenefits, cardKey, buildIndexes, resolveBenefit },
+  _internals: { computeMyCard, computeStats, benefitUsed, benefitHistory, waiverState, normalizeCard, normalizeBenefits, cardKey, buildIndexes, resolveBenefit, sameRepaySchedule, groupAssignError },
 };

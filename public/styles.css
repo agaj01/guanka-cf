@@ -415,6 +415,22 @@ input, select, textarea { font-family: inherit; font-size: 14px; }
 .toast.error { border-color: var(--red); color: var(--red); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 
+/* ============ 合并账单组 ============ */
+.bg-group {
+  border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;
+  background: var(--surface); border-left: 3px solid var(--purple);
+}
+.bg-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bg-name { font-size: 13px; font-weight: 500; color: var(--text); }
+.bg-member {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px;
+  font-size: 13px; color: var(--text); cursor: pointer;
+}
+.bg-member:hover { background: var(--surface-2); }
+.bg-member input { margin: 0; }
+.bg-member input:disabled + span { color: var(--text-3); }
+.bg-member input:disabled { cursor: not-allowed; }
+
 /* ============ 响应式 ============ */
 @media (max-width: 900px) {
   .stats { grid-template-columns: 1fr 1fr; }

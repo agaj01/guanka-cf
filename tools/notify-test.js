@@ -21,7 +21,9 @@ const server = http.createServer((req, res) => {
 });
 
 let failures = 0;
+let total = 0;
 function check(name, cond, extra) {
+  total++;
   console.log((cond ? '  ✅ ' : '  ❌ ') + name + (cond ? '' : '  → ' + extra));
   if (!cond) failures++;
 }
@@ -371,6 +373,128 @@ async function main() {
   fs.rmSync('.notify-test-data7', { recursive: true, force: true });
 
   console.log();
+  console.log('=== 5.13 合并账单组（还款提醒按组合并为 1 条）===');
+  fs.rmSync('.notify-test-data8', { recursive: true, force: true });
+  const store8 = new Store('.notify-test-data8');
+  routes.init(store8);
+  const db8 = store8.read('cards', []);
+  const post8 = (p, b) => routes.handle('POST', p, new URL('http://x/p'), b);
+  const put8 = (p, b) => routes.handle('PUT', p, new URL('http://x/p'), b);
+  const del8 = (p) => routes.handle('DELETE', p, new URL('http://x/p'), null);
+  const get8 = (p) => routes.handle('GET', p, new URL('http://x/p'), null);
+  const mk8 = (cardId, o) => post8('/api/mycards', Object.assign({
+    cardId, alias: '', creditLimit: 50000, billingDay: 1, repayMode: 'fixed', repayValue: 20,
+    graceDays: 3, feeMonth: 1, feeDay: 1, benefits: [],
+  }, o || {}));
+  const probeNow = new Date(2026, 9, 13); // 2026-10-13
+
+  const gA = (await mk8(db8[0].id, { alias: '合并A' })).body;
+  const gB = (await mk8(db8[1].id, { alias: '合并B' })).body;
+  const gC = (await mk8(db8[2].id, { alias: '独立C' })).body;       // 不入组
+  const gD = (await mk8(db8[3].id, { alias: '还款25' , repayValue: 25})).body; // 不同还款日
+
+  // 组内必须同还款日（策略③）：先拒绝，再成功
+  const badG = await post8('/api/billgroups', { name: '不一致组', memberIds: [gA.id, gD.id] });
+  check('组内还款日不一致 → 拒绝建组', badG.status === 400 && /还款日不一致/.test(badG.body.error), JSON.stringify(badG.body));
+  const only = await post8('/api/billgroups', { name: '单卡组', memberIds: [gA.id] });
+  check('成员少于 2 张 → 拒绝', only.status === 400, JSON.stringify(only.body));
+
+  const grp = (await post8('/api/billgroups', { name: '招行合并还款', memberIds: [gA.id, gB.id] })).body;
+  check('同还款日可建组', !!grp.id, JSON.stringify(grp));
+
+  const list8 = (await get8('/api/mycards')).body;
+  const rA = list8.data.find((m) => m.id === gA.id);
+  check('持卡回显 billGroupName', rA.billGroupName === '招行合并还款', rA.billGroupName);
+  check('/api/mycards 返回 billGroups', Array.isArray(list8.billGroups) && list8.billGroups.length === 1, JSON.stringify(list8.billGroups));
+
+  // 编辑持卡破坏一致性应被拦（改还款日 / 把不一致的卡挪进组）
+  const breakIt = await put8('/api/mycards/' + gA.id, { repayValue: 25 });
+  check('组内成员改还款日 → 拒绝', breakIt.status === 400 && /还款日不一致/.test(breakIt.body.error), JSON.stringify(breakIt.body));
+  const moveIn = await put8('/api/mycards/' + gD.id, { billGroupId: grp.id });
+  check('把还款日不同的卡挪进组 → 拒绝', moveIn.status === 400 && /还款日不一致/.test(moveIn.body.error), JSON.stringify(moveIn.body));
+  const moveOut = await put8('/api/mycards/' + gB.id, { billGroupId: '' });
+  check('可退出组', moveOut.status === 200 && moveOut.body.billGroupId === '');
+  await put8('/api/mycards/' + gB.id, { billGroupId: grp.id });
+
+  // 还款提醒：组内 2 张只产出 1 条，且 key 为组级
+  const idx8 = routes._internals.buildIndexes();
+  const comp8 = store8.read('mycards', []).map((m) => routes._internals.computeMyCard(m, probeNow, idx8));
+  for (const m of comp8) m.payment = Object.assign({}, m.payment, { payDaysLeft: 3, lastPayDate: '2026-10-16' });
+  const cfg8 = reminder.normalizeConfig({ rules: { repayBeforeDays: 3, taskRemainDays: 0, billBeforeDays: 0, billOverdueRemind: 0, feeDays: [] } });
+  const rep8 = reminder.collectReminders(comp8, cfg8, probeNow, []).filter((x) => x.type === 'repay');
+  const gItem8 = rep8.find((x) => x.key.indexOf('repay:group:') === 0);
+  check('组内 2 张卡只产出 1 条还款提醒', rep8.filter((x) => /group/.test(x.key)).length === 1, JSON.stringify(rep8.map((x) => x.key)));
+  check('合并提醒 key 前缀为 repay:group:', !!gItem8 && gItem8.key.indexOf('repay:group:' + grp.id) === 0, gItem8 && gItem8.key);
+  check('合并提醒标题含「2 张卡合并」', !!gItem8 && /2 张卡合并/.test(gItem8.title), gItem8 && gItem8.title);
+  check('合并提醒正文列出两张卡', !!gItem8 && /合并A/.test(gItem8.body) && /合并B/.test(gItem8.body), gItem8 && gItem8.body);
+  check('未入组卡各自提醒（2 张 → 2 条）', rep8.filter((x) => !/group/.test(x.key)).length === 2, JSON.stringify(rep8.filter((x) => !/group/.test(x.key)).map((x) => x.key)));
+
+  // 3 天 → 当天的 key 必须变化，否则当天提醒会被去重吞掉
+  const comp0 = comp8.map((m) => (m.billGroupId === grp.id
+    ? Object.assign({}, m, { payment: Object.assign({}, m.payment, { payDaysLeft: 0 }) }) : m));
+  const rep0 = reminder.collectReminders(comp0, reminder.normalizeConfig({ rules: { repayBeforeDays: 3, feeDays: [] } }), probeNow, []).filter((x) => x.key.indexOf('repay:group:') === 0);
+  check('3 天与当天 key 不同（当天提醒不被吞）', !!gItem8 && !!rep0[0] && gItem8.key !== rep0[0].key, (gItem8 && gItem8.key) + ' vs ' + (rep0[0] && rep0[0].key));
+  check('当天提醒标题为「今日还款」', !!rep0[0] && /今日还款/.test(rep0[0].title), rep0[0] && rep0[0].title);
+
+  // 账单流水：同组同月合并
+  await post8('/api/bills', { myCardId: gA.id, month: '2026-10', amount: 12400, dueDate: '2026-10-16' });
+  await post8('/api/bills', { myCardId: gB.id, month: '2026-10', amount: 3600, dueDate: '2026-10-16' });
+  const cfgB8 = reminder.normalizeConfig({ rules: { repayBeforeDays: 0, taskRemainDays: 0, billBeforeDays: 3, billOverdueRemind: 1, feeDays: [] } });
+  const bill8 = reminder.collectReminders(comp8, cfgB8, probeNow, store8.read('bills', [])).filter((x) => x.type === 'bill');
+  check('同组同月账单合并为 1 条', bill8.length === 1, JSON.stringify(bill8.map((x) => x.key)));
+  check('合并账单提醒金额为合计', bill8.length === 1 && /16,000/.test(bill8[0].body), bill8.length ? bill8[0].body : '');
+
+  // 年费/刷卡任务不参与合并（每张卡独立）
+  const compFee8 = comp8.map((m) => Object.assign({}, m, { feeDays: 7, waiver: { needsPayment: true, kind: '刚性' } }));
+  const fee8 = reminder.collectReminders(compFee8, reminder.normalizeConfig({ rules: { feeDays: [30, 7, 1], repayBeforeDays: 0, taskRemainDays: 0 } }), probeNow, []);
+  check('年费提醒仍按卡推送（4 张 → 4 条）', fee8.filter((x) => x.type === 'fee').length === 4, String(fee8.filter((x) => x.type === 'fee').length));
+
+  // 改组 / 解散 / 删卡清理
+  const putG = await put8('/api/billgroups/' + grp.id, { name: '改名后', memberIds: [gA.id, gB.id, gC.id] });
+  check('可改组名与成员', putG.status === 200 && putG.body.name === '改名后', JSON.stringify(putG.body));
+  const afterPut = (await get8('/api/billgroups')).body;
+  check('成员数更新为 3', afterPut[0].memberCount === 3, JSON.stringify(afterPut[0]));
+  check('新成员 billGroupId 已写入', (await get8('/api/mycards')).body.data.find((m) => m.id === gC.id).billGroupId === grp.id);
+
+  const delG = await del8('/api/billgroups/' + grp.id);
+  check('解散组成功', delG.status === 200 && delG.body.ok === true, JSON.stringify(delG.body));
+  const afterDel = (await get8('/api/mycards')).body;
+  check('解散后成员 billGroupId 全清空', afterDel.data.every((m) => m.billGroupId === '') && afterDel.billGroups.length === 0, JSON.stringify(afterDel.data.map((m) => m.billGroupId)));
+
+  // 改组后只剩 1 张卡 → 拒绝（避免产生名存实亡的组），组状态保持不变
+  const solo = (await post8('/api/billgroups', { name: '两卡组', memberIds: [gA.id, gB.id] })).body;
+  check('解散后可重新建组', !!solo.id, JSON.stringify(solo));
+  const shrinkToOne = await put8('/api/billgroups/' + solo.id, { name: '两卡组', memberIds: [gA.id] });
+  check('改组后成员只剩 1 张 → 400 拒绝', shrinkToOne.status === 400 && /至少需要 2 张卡/.test(shrinkToOne.body.error), JSON.stringify(shrinkToOne.body));
+  const stillThere = (await get8('/api/billgroups')).body.find((g) => g.id === solo.id);
+  check('被拒绝的改组不改变原状态', !!stillThere && stillThere.memberCount === 2, JSON.stringify(stillThere));
+  check('被拒绝的改组不落地成员变更', (await get8('/api/mycards')).body.data.filter((m) => m.billGroupId === solo.id).length === 2);
+  await del8('/api/billgroups/' + solo.id);
+
+  const grp2 = (await post8('/api/billgroups', { name: '临时组', memberIds: [gA.id, gB.id] })).body;
+  await del8('/api/mycards/' + gA.id);
+  await del8('/api/mycards/' + gB.id);
+  check('成员删空后组自动解散（无僵尸组）', (await get8('/api/billgroups')).body.length === 0, JSON.stringify((await get8('/api/billgroups')).body));
+  check('无悬空 billGroupId', (await get8('/api/mycards')).body.data.every((m) => !m.billGroupId));
+
+  check('未知组 id → 404', (await put8('/api/billgroups/nope', { name: 'x' })).status === 404);
+  check('删未知组 → 404', (await del8('/api/billgroups/nope')).status === 404);
+  check('成员不存在 → 404', (await post8('/api/billgroups', { name: 'zz', memberIds: ['nope', gD.id] })).status === 404);
+
+  // 还款节奏一致性判定：10 月恰好同日、换月会错开的组合必须判为不一致
+  const S = routes._internals.sameRepaySchedule;
+  const F = (v, g) => ({ billingDay: 1, repayMode: 'fixed', repayValue: v, graceDays: g == null ? 3 : g });
+  const A = (n) => ({ billingDay: 1, repayMode: 'afterBill', repayValue: n, graceDays: 3 });
+  check('fixed20 vs fixed20 → 一致', S(F(20), F(20), probeNow) === true);
+  check('fixed20 vs fixed25 → 不一致', S(F(20), F(25), probeNow) === false);
+  check('fixed20 vs afterBill20 → 不一致', S(F(20), A(20), probeNow) === false);
+  check('当月恰好同日但换月错开 → 不一致', S(F(5, 0), A(4), probeNow) === false);
+  check('同日期不同宽限期 → 不一致', S(F(20, 3), F(20, 5), probeNow) === false);
+
+  store8.write('mycards', []); store8.write('bills', []); store8.write('billGroups', []);
+  fs.rmSync('.notify-test-data8', { recursive: true, force: true });
+
+  console.log();
   console.log('=== 6. 去重与推送记录 ===');
   const cfg2 = reminder.normalizeConfig({ enabled: true, channels: { bark: { enabled: true, deviceKey: 'bkkey', server: base + '/bark' } } });
   const out1 = await reminder.runChecks(cards, cfg2, notifier, now);
@@ -388,7 +512,10 @@ async function main() {
 
   server.close();
   console.log();
-  console.log(failures === 0 ? '========== 提醒功能测试全部通过 ==========' : '========== 失败 ' + failures + ' 项 ==========');
+  const passed = total - failures;
+  console.log(failures === 0
+    ? '========== 提醒功能测试全部通过（' + passed + '/' + total + ' 项）=========='
+    : '========== 失败 ' + failures + ' 项（通过 ' + passed + '/' + total + '）==========');
   process.exit(failures ? 1 : 0);
 }
 

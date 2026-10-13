@@ -5,7 +5,9 @@
 const D = require('../server/dates');
 
 let failures = 0;
+let total = 0;
 function check(name, cond, extra) {
+  total++;
   console.log((cond ? '  ✅ ' : '  ❌ ') + name + (cond ? '' : '  → ' + extra));
   if (!cond) failures++;
 }
@@ -85,6 +87,9 @@ check('连续 120 天 payDaysLeft 均 >= 0（永不逾期）', minLeft >= 0, 'mi
 
 server_done: {
   console.log();
-  console.log(failures === 0 ? '========== 日期引擎测试全部通过 ==========' : '========== 失败 ' + failures + ' 项 ==========');
+  const passed = total - failures;
+  console.log(failures === 0
+    ? '========== 日期引擎测试全部通过（' + passed + '/' + total + ' 项）=========='
+    : '========== 失败 ' + failures + ' 项（通过 ' + passed + '/' + total + '）==========');
   process.exit(failures ? 1 : 0);
 }
