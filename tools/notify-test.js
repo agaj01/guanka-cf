@@ -171,6 +171,8 @@ async function main() {
   console.log();
   console.log('=== 5.5 年费达标判定（feeStatusOf 回归）===');
   // computeMyCard 全链路：免年费卡此前误报「未达标」、feeAlert 恒「正常」
+  // 先清目录：上一次运行若被中断会留下脏数据，导致「消费表为空」等断言误报
+  fs.rmSync('.notify-test-data2', { recursive: true, force: true });
   const store2 = new Store('.notify-test-data2');
   routes.init(store2);
   const seedCards2 = store2.read('cards', []);
@@ -203,6 +205,8 @@ async function main() {
 
   console.log();
   console.log('=== 5.7 消费记录删除（R3-F1 回归）===');
+  // 先清目录：同上，避免残留记录导致「删除后消费表为空」误报
+  fs.rmSync('.notify-test-data4', { recursive: true, force: true });
   const store4 = new Store('.notify-test-data4');
   routes.init(store4);
   const seed4 = store4.read('cards', [])[0];
@@ -233,6 +237,7 @@ async function main() {
 
   console.log();
   console.log('=== 5.8 提醒检查并发互斥（R3-2 回归）===');
+  fs.rmSync('.notify-test-data5', { recursive: true, force: true });
   const store5 = new Store('.notify-test-data5');
   routes.init(store5);
   store5.write('notify', { enabled: true, intervalMinutes: 0, channels: { bark: { enabled: true, deviceKey: 'bkkey', server: base + '/bark' } } });
@@ -241,6 +246,129 @@ async function main() {
   check('并发两次检查恰有一次被互斥跳过', skippedOne === 1, JSON.stringify([c1, c2]));
   store5.write('notify', { enabled: false });
   fs.rmSync('.notify-test-data5', { recursive: true, force: true });
+
+  console.log();
+  console.log('=== 5.9 权益稳定 id（R5-5 回归：增删/重排不错位）===');
+  fs.rmSync('.notify-test-data6', { recursive: true, force: true });
+  const store6 = new Store('.notify-test-data6');
+  routes.init(store6);
+  const seed6 = store6.read('cards', [])[0];
+  const post = (p, body) => routes.handle('POST', p, new URL('http://x/p'), body);
+  const put = (p, body) => routes.handle('PUT', p, new URL('http://x/p'), body);
+  const get = (p) => routes.handle('GET', p, new URL('http://x/p'), null);
+
+  // 走真实 API 建档（权益经 normalizeBenefits 规范化、获得稳定 id）
+  const mcId = (await post('/api/mycards', {
+    cardId: seed6.id, alias: '权益id测试', annualFee: 0, waiverType: '免年费',
+    benefits: [{ name: 'A贵宾厅', total: 2 }, { name: 'B代驾', total: 5 }],
+  })).body.id;
+  let m6 = (await get('/api/mycards')).body.data.find((x) => x.id === mcId);
+  const bidA = m6.benefits[0].id, bidB = m6.benefits[1].id;
+  check('权益自动获得稳定 id', !!(bidA && bidB && bidA !== bidB), JSON.stringify([bidA, bidB]));
+
+  await post('/api/mycards/' + mcId + '/benefits/0/usage', { date: U.todayStr(), bid: bidA });
+  await post('/api/mycards/' + mcId + '/benefits/0/usage', { date: U.todayStr(), bid: bidA });
+  m6 = (await get('/api/mycards')).body.data.find((x) => x.id === mcId);
+  check('A 累计使用 2 次', m6.benefits[0].used === 2, JSON.stringify(m6.benefits.map((b) => b.name + '=' + b.used)));
+
+  // 删掉 A：修复前 B 会因索引前移而继承 A 的 2 次
+  await put('/api/mycards/' + mcId, { benefits: [{ id: bidB, name: 'B代驾', total: 5 }] });
+  m6 = (await get('/api/mycards')).body.data.find((x) => x.id === mcId);
+  check('删除 A 后 B 使用次数为 0（不继承 A 的历史）', m6.benefits[0].used === 0, 'B.used=' + m6.benefits[0].used);
+
+  // 重排：C 前置，各自记录必须跟随权益本身
+  await put('/api/mycards/' + mcId, { benefits: [{ id: bidB, name: 'B代驾', total: 5 }, { name: 'C洗牙', total: 3 }] });
+  m6 = (await get('/api/mycards')).body.data.find((x) => x.id === mcId);
+  const bidC = m6.benefits[1].id;
+  await post('/api/mycards/' + mcId + '/benefits/1/count', { count: 3, bid: bidC });
+  await put('/api/mycards/' + mcId, { benefits: [{ id: bidC, name: 'C洗牙', total: 3 }, { id: bidB, name: 'B代驾', total: 5 }] });
+  m6 = (await get('/api/mycards')).body.data.find((x) => x.id === mcId);
+  check('重排后 C=3 / B=0（记录跟随权益）', m6.benefits[0].used === 3 && m6.benefits[1].used === 0,
+    JSON.stringify(m6.benefits.map((b) => b.name + '=' + b.used)));
+
+  console.log();
+  console.log('=== 5.10 权益接口边界与日期真实性（R5-1/R5-2 回归）===');
+  const oob = await post('/api/mycards/' + mcId + '/benefits/99/usage', { date: U.todayStr() });
+  check('越界索引 usage → 404（不再写入垃圾记录）', oob.status === 404, JSON.stringify(oob));
+  const oobC = await post('/api/mycards/' + mcId + '/benefits/99/count', { count: 1 });
+  check('越界索引 count → 404', oobC.status === 404, JSON.stringify(oobC));
+  const oobH = await get('/api/mycards/' + mcId + '/benefits/99/history');
+  check('越界索引 history → 404', oobH.status === 404, JSON.stringify(oobH));
+  const badBid = await post('/api/mycards/' + mcId + '/benefits/0/usage', { date: U.todayStr(), bid: 'nope' });
+  check('未知 bid → 404', badBid.status === 404, JSON.stringify(badBid));
+  check('越界请求未产生任何记录', store6.read('benefits', []).filter((r) => r.idx === 99).length === 0,
+    JSON.stringify(store6.read('benefits', [])));
+
+  // 日期真实性：2026-02-30 / 2026-13-01 均不存在，必须被拒（此前静默进位入库）
+  check('parseDateStr 拒绝 2026-02-30', U.parseDateStr('2026-02-30') === null, String(U.parseDateStr('2026-02-30')));
+  check('parseDateStr 拒绝 2026-13-01', U.parseDateStr('2026-13-01') === null, String(U.parseDateStr('2026-13-01')));
+  check('parseDateStr 接受 2026-02-28', U.parseDateStr('2026-02-28') !== null, String(U.parseDateStr('2026-02-28')));
+  const dirtyCons = await post('/api/mycards/' + mcId + '/consumptions', { date: '2026-02-30', amount: 10 });
+  check('消费脏日期被回退为今天', dirtyCons.status === 201 && dirtyCons.body.date !== '2026-02-30', JSON.stringify(dirtyCons.body && dirtyCons.body.date));
+  const dirtyBill = await post('/api/bills', { myCardId: mcId, month: '2099-01', amount: 100, dueDate: '2026-02-30' });
+  check('账单脏 dueDate 被忽略', dirtyBill.status === 201 && dirtyBill.body.dueDate === '', JSON.stringify(dirtyBill.body && dirtyBill.body.dueDate));
+  // PUT 也要拦脏日期（此前只做 String() 透传）
+  const dirtyBillPut = await put('/api/bills/' + dirtyBill.body.id, { dueDate: '2026-13-01', paidDate: '2026-02-31' });
+  check('账单 PUT 脏日期同样被拦', dirtyBillPut.status === 200 && dirtyBillPut.body.dueDate === '' && dirtyBillPut.body.paidDate === '',
+    JSON.stringify({ dueDate: dirtyBillPut.body && dirtyBillPut.body.dueDate, paidDate: dirtyBillPut.body && dirtyBillPut.body.paidDate }));
+  store6.write('mycards', []);
+  store6.write('bills', []);
+  fs.rmSync('.notify-test-data6', { recursive: true, force: true });
+
+  console.log();
+  console.log('=== 5.11 年费当天提醒去重键（R5-4 回归）===');
+  {
+    // feeDays 从 1 跨到 0 时必须产生不同的 key，否则「年费今日收取」被去重吞掉
+    const c = { id: 'mc_x', name: 'X卡', annualFee: 3600, feeDays: 1, nextFeeDate: '2030-05-06',
+      waiver: { needsPayment: true, kind: '刚性', statusText: '需缴费' } };
+    const cfgT = reminder.normalizeConfig({ rules: { feeDays: [30, 7, 1] } });
+    const it1 = reminder.collectReminders([c], cfgT, new Date(), []).find((x) => x.type === 'fee');
+    const it0 = reminder.collectReminders([Object.assign({}, c, { feeDays: 0 })], cfgT, new Date(), []).find((x) => x.type === 'fee');
+    check('feeDays=1 与 feeDays=0 的 key 不同', !!it1 && !!it0 && it1.key !== it0.key, (it1 && it1.key) + ' vs ' + (it0 && it0.key));
+    check('feeDays=0 标题为「年费今日收取」', !!it0 && /年费今日收取/.test(it0.title), it0 && it0.title);
+  }
+
+  console.log();
+  console.log('=== 5.12 权益生命周期边界（R5-6/R5-7/R5-8 回归）===');
+  fs.rmSync('.notify-test-data7', { recursive: true, force: true });
+  const store7 = new Store('.notify-test-data7');
+  routes.init(store7);
+  const seed7 = store7.read('cards', []).find((c) => c.annualFee === 0) || store7.read('cards', [])[0];
+  const post7 = (p, b) => routes.handle('POST', p, new URL('http://x/p'), b);
+  const put7 = (p, b) => routes.handle('PUT', p, new URL('http://x/p'), b);
+  const get7 = (p) => routes.handle('GET', p, new URL('http://x/p'), null);
+
+  // R5-8：显式提交空数组应真的清空，而不是回退到卡种默认权益
+  const empty = (await post7('/api/mycards', { cardId: seed7.id, alias: '清空测试', annualFee: 0, waiverType: '免年费', benefits: [] })).body;
+  check('显式提交 benefits:[] → 权益为空（不回填卡种默认）', (empty.benefits || []).length === 0,
+    JSON.stringify((empty.benefits || []).map((b) => b.name)));
+  const inherit = (await post7('/api/mycards', { cardId: seed7.id, alias: '继承测试', annualFee: 0, waiverType: '免年费' })).body;
+  check('不传 benefits → 继承卡种默认权益', (inherit.benefits || []).length === (seed7.benefits || []).length,
+    JSON.stringify((inherit.benefits || []).map((b) => b.name)));
+
+  // R5-6：过期权益不得再写入/补录
+  const mc7 = (await post7('/api/mycards', {
+    cardId: seed7.id, alias: '过期测试', annualFee: 0, waiverType: '免年费',
+    benefits: [{ name: '限时', total: 5, validUntil: '2020-01-01' }, { name: '长期', total: 5 }],
+  })).body;
+  const expB = (await get7('/api/mycards')).body.data.find((x) => x.id === mc7.id).benefits[0];
+  check('过期权益 expired=true 且不计入 exhausted', expB.expired === true && expB.exhausted === false, JSON.stringify(expB));
+  const expUse = await post7('/api/mycards/' + mc7.id + '/benefits/0/usage', { date: U.todayStr(), bid: expB.id });
+  check('过期权益 usage → 400 拦截', expUse.status === 400 && /有效期/.test(expUse.body.error), JSON.stringify(expUse));
+  const expCnt = await post7('/api/mycards/' + mc7.id + '/benefits/0/count', { count: 1, bid: expB.id });
+  check('过期权益 count → 400 拦截', expCnt.status === 400 && /有效期/.test(expCnt.body.error), JSON.stringify(expCnt));
+
+  // R5-7：删除权益应连带清理其使用记录，避免孤儿记录无限累积
+  const liveB = (await get7('/api/mycards')).body.data.find((x) => x.id === mc7.id).benefits[1];
+  await post7('/api/mycards/' + mc7.id + '/benefits/1/usage', { date: U.todayStr(), bid: liveB.id });
+  await post7('/api/mycards/' + mc7.id + '/benefits/1/usage', { date: U.todayStr(), bid: liveB.id });
+  const recsBefore = store7.read('benefits', []).length;
+  await put7('/api/mycards/' + mc7.id, { benefits: [{ name: '长期', total: 5 }] }); // 换掉 id → 旧记录成孤儿
+  const recsAfter = store7.read('benefits', []).length;
+  check('移除权益后其使用记录被连带清理', recsAfter === 0, '清理前 ' + recsBefore + ' 条，清理后 ' + recsAfter + ' 条：' + JSON.stringify(store7.read('benefits', [])));
+
+  store7.write('mycards', []); store7.write('benefits', []); store7.write('bills', []);
+  fs.rmSync('.notify-test-data7', { recursive: true, force: true });
 
   console.log();
   console.log('=== 6. 去重与推送记录 ===');

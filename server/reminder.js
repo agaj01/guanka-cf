@@ -107,7 +107,9 @@ function feeItem(m, days, feeDayThreshold) {
   ].join('\n');
   return {
     type: 'fee',
-    key: `fee:${m.id}:${m.nextFeeDate}:${feeDayThreshold}`,
+    // key 必须区分「倒数第 N 天」与「年费当天」：否则 feeDays 从 1 跨到 0 时 key 相同，
+    // 当天那条「年费今日收取」会被去重逻辑吞掉、永远发不出去
+    key: `fee:${m.id}:${m.nextFeeDate}:${days === 0 ? 'today' : feeDayThreshold}`,
     title, body,
   };
 }

@@ -6,6 +6,10 @@ data/*.tmp
 # 测试/基准产物
 .test-data/
 .bench-data/
+.notify-test-data*/
+.r5-data/
+.r5probe2-data/
+.probe-data/
 *.log
 
 # 依赖与系统文件

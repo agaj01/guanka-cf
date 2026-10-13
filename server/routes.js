@@ -62,6 +62,31 @@ function init(s) {
   store.read('consumptions', []);
   store.read('benefits', []);
   store.read('settings', { theme: 'light', bankOrder: [], banksCollapsed: {}, cardBanksCollapsed: {} });
+  migrateBenefitIds();
+}
+
+// 一次性迁移：历史权益与权益记录此前只按索引归属，编辑时增删/重排会导致记录错配（B 继承 A 的历史）。
+// 这里按「当前索引 → 权益」的对应关系补稳定 id（迁移瞬间该映射仍成立），此后记录一律按 id 归属。
+function migrateBenefitIds() {
+  const mcs = getMyCards();
+  let bChanged = 0;
+  for (const mc of mcs) {
+    for (const b of mc.benefits || []) {
+      if (!b.id) { b.id = U.uid(); bChanged++; }
+    }
+  }
+  if (bChanged) store.write('mycards', mcs);
+  const mcById = new Map(mcs.map((m) => [m.id, m]));
+  const recs = getBenefits();
+  let rChanged = 0;
+  for (const r of recs) {
+    if (r.bid) continue;
+    const mc = mcById.get(r.myCardId);
+    const b = mc && (mc.benefits || [])[r.idx];
+    if (b && b.id) { r.bid = b.id; rChanged++; }
+  }
+  if (rChanged) store.write('benefits', recs);
+  if (bChanged || rChanged) console.log(`[管卡] 权益稳定 id 迁移完成：权益 ${bChanged} 项、历史记录 ${rChanged} 条`);
 }
 
 function cardKey(c) {
@@ -105,8 +130,11 @@ function buildIndexes() {
   for (const r of getBenefits()) {
     let m = benByCard.get(r.myCardId);
     if (!m) { m = new Map(); benByCard.set(r.myCardId, m); }
-    if (!m.has(r.idx)) m.set(r.idx, []);
-    m.get(r.idx).push(r);
+    // 优先按稳定 id 分桶（权益增删/重排后索引会前移，按 idx 分桶会张冠李戴）；
+    // 无 bid 的历史记录退回 idx 桶，由查询侧兼容
+    const key = r.bid ? 'bid:' + r.bid : 'idx:' + r.idx;
+    if (!m.has(key)) m.set(key, []);
+    m.get(key).push(r);
   }
   return { consByCard, benByCard };
 }
@@ -188,8 +216,7 @@ function computeMyCard(mc, now, idx) {
     const u = benefitUsed(mc, i, now, idx);
     // 展开全部使用态：used / remaining / unlimited / expired / exhausted
     return { ...b, ...u };
-  });
-  const monthSpend = recs.amount.filter((r) => r.date >= monthStart).reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  });  const monthSpend = recs.amount.filter((r) => r.date >= monthStart).reduce((s, r) => s + (Number(r.amount) || 0), 0);
   const yearSpend = recs.amount.filter((r) => r.date >= yearStart).reduce((s, r) => s + (Number(r.amount) || 0), 0);
   // 还款信息（宽限期 + 两种还款方式）与预警分级
   const payment = D.paymentInfo(mc, now);
@@ -259,22 +286,31 @@ function computeStats(now, idx, computed) {
 }
 
 // ---------- 权益使用 ----------
-function benefitRecords(idx, myCardId, benefitIdx) {
+// 记录归属判定：优先按稳定 id（bid）；无 bid 的历史记录按索引匹配（迁移后应已补齐）
+function benefitRecords(idx, myCardId, benefitIdx, bid) {
   const m = idx.benByCard.get(myCardId);
-  return (m && m.get(benefitIdx)) || [];
+  if (!m) return [];
+  const out = [];
+  if (bid) out.push(...(m.get('bid:' + bid) || []));
+  // 兼容尚未迁移的历史记录（无 bid，只能按 idx 归属）
+  for (const r of m.get('idx:' + benefitIdx) || []) if (!r.bid) out.push(r);
+  return out;
 }
 
-function benefitUsage(myCardId, idx) {
-  return getBenefits().filter((r) => r.myCardId === myCardId && r.idx === idx);
+function benefitUsage(myCardId, idx, bid) {
+  const all = getBenefits().filter((r) => r.myCardId === myCardId);
+  if (bid) return all.filter((r) => (r.bid ? r.bid === bid : r.idx === idx));
+  return all.filter((r) => r.idx === idx);
 }
 
-function benefitUsed(mc, idx, now, index) {
+function benefitUsed(mc, idx, now, index, bid) {
   now = now || new Date();
   const b = (mc.benefits || [])[idx];
-  if (!b) return { used: 0, total: 0, exhausted: false, cycle: '自然月' };
+  if (!b) return { used: 0, total: 0, exhausted: false, cycle: '自然月', missing: true };
   const start = U.cycleStart(b.resetCycle, mc.feeMonth, mc.feeDay, now);
   const startStr = U.toDateStr(start);
-  const recs = (index ? benefitRecords(index, mc.id, idx) : benefitUsage(mc.id, idx)).filter((r) => r.date >= startStr);
+  const useBid = bid !== undefined ? bid : b.id;
+  const recs = (index ? benefitRecords(index, mc.id, idx, useBid) : benefitUsage(mc.id, idx, useBid)).filter((r) => r.date >= startStr);
   const used = recs.filter((r) => r.type === 'usage').length
     + recs.filter((r) => r.type === 'count').reduce((s, r) => s + (Number(r.count) || 0), 0);
   const total = Number(b.total) || 0;
@@ -292,10 +328,10 @@ function benefitUsed(mc, idx, now, index) {
   };
 }
 
-function benefitHistory(mc, idx) {
-  const recs = benefitUsage(mc.id, idx);
+function benefitHistory(mc, idx, bid) {
   const b = (mc.benefits || [])[idx];
   if (!b) return [];
+  const recs = benefitUsage(mc.id, idx, bid !== undefined ? bid : b.id);
   const groups = new Map();
   for (const r of recs) {
     const key = U.cycleKeyOf(b.resetCycle, mc.feeMonth, mc.feeDay, r.date);
@@ -538,7 +574,15 @@ async function handle(method, pathname, url, body) {
       last4: b.last4 != null ? String(b.last4).replace(/\D/g, '').slice(0, 4) : cur.last4,
       monthlySpendTarget: b.monthlySpendTarget != null ? nonNeg(b.monthlySpendTarget, 0) : cur.monthlySpendTarget,
     };
-    if (b.benefits !== undefined) updated.benefits = normalizeBenefits(b.benefits, []);
+    if (b.benefits !== undefined) {
+      updated.benefits = normalizeBenefits(b.benefits, []);
+      // 权益被移除后，其使用记录按 id 归属已无人可展示（历史与次数都查不到），
+      // 留着只会随每次编辑无限累积，这里随权益列表一起清理
+      const kept = new Set(updated.benefits.map((x) => x.id));
+      const recs = getBenefits();
+      const remain = recs.filter((r) => !(r.myCardId === cur.id && r.bid && !kept.has(r.bid)));
+      if (remain.length !== recs.length) store.write('benefits', remain);
+    }
     myCards[i] = updated;
     store.write('mycards', myCards);
     return json(computeMyCard(updated, now));
@@ -624,18 +668,27 @@ async function handle(method, pathname, url, body) {
   if (benHisMatch && method === 'GET') {
     const mc = getMyCards().find((m) => m.id === benHisMatch[1]);
     if (!mc) return err('持卡不存在', 404);
-    return json(benefitHistory(mc, +benHisMatch[2]));
+    const ref = resolveBenefit(mc, +benHisMatch[2], url.searchParams.get('bid'));
+    if (!ref) return err('权益不存在', 404);
+    return json(benefitHistory(mc, ref.idx, ref.bid));
   }
   const benUseMatch = pathname.match(/^\/api\/mycards\/([^/]+)\/benefits\/(\d+)\/usage$/);
   if (benUseMatch && method === 'POST') {
     const mc = getMyCards().find((m) => m.id === benUseMatch[1]);
     if (!mc) return err('持卡不存在', 404);
-    const idx = +benUseMatch[2];
+    const ref = resolveBenefit(mc, +benUseMatch[2], (body || {}).bid);
+    // 越界索引必须拒绝：computeMyCard 的 benefitUsed 对不存在权益返回 exhausted=false，
+    // 若这里放行就会写入 idx 找不到权益的垃圾记录（永远无人展示、也无法清理）
+    if (!ref) return err('权益不存在', 404);
+    const idx = ref.idx;
     const st = benefitUsed(mc, idx, now);
+    // 有效期已过：computeMyCard 已把 exhausted 置 false（避免显示成「次数用完」误导），
+    // 因此这里必须单独拦 expired，否则过期权益仍能写入记录
+    if (st.expired) return err('当前权益已过有效期');
     if (st.exhausted) return err('当前权益次数已用完');
     const b = body || {};
     const rec = {
-      id: U.uid(), myCardId: mc.id, idx, type: 'usage',
+      id: U.uid(), myCardId: mc.id, idx, bid: ref.bid, type: 'usage',
       date: U.parseDateStr(b.date) ? String(b.date) : U.todayStr(),
       note: String(b.note || '').trim(),
       createdAt: now.toISOString(),
@@ -649,15 +702,18 @@ async function handle(method, pathname, url, body) {
   if (benCntMatch && method === 'POST') {
     const mc = getMyCards().find((m) => m.id === benCntMatch[1]);
     if (!mc) return err('持卡不存在', 404);
-    const idx = +benCntMatch[2];
+    const ref = resolveBenefit(mc, +benCntMatch[2], (body || {}).bid);
+    if (!ref) return err('权益不存在', 404);
+    const idx = ref.idx;
     const st = benefitUsed(mc, idx, now);
     const b = body || {};
     const count = validCount(b.count);
     if (count === null) return err('补录次数必须为大于 0 的整数');
+    if (st.expired) return err('当前权益已过有效期');
     // -1 = 不限次，不做上限拦截（之前 st.used + count > -1 恒为真，不限次权益无法补录）
     if (st.total >= 0 && st.used + count > st.total) return err('当前权益次数已用完（剩余 ' + Math.max(0, st.total - st.used) + ' 次）');
     const rec = {
-      id: U.uid(), myCardId: mc.id, idx, type: 'count',
+      id: U.uid(), myCardId: mc.id, idx, bid: ref.bid, type: 'count',
       date: U.parseDateStr(b.date) ? String(b.date) : U.todayStr(),
       count,
       createdAt: now.toISOString(),
@@ -695,9 +751,10 @@ async function handle(method, pathname, url, body) {
       myCardId: b.myCardId,
       month: String(b.month),
       amount: Math.round(amount * 100) / 100,
-      dueDate: String(b.dueDate || ''),
+      // 日期一律经真实校验（拒绝 2026-02-30 / 2026-13-01 这类不存在的日期）
+      dueDate: U.parseDateStr(b.dueDate) ? String(b.dueDate) : '',
       paid: b.paid === '已还' ? '已还' : '未还',
-      paidDate: String(b.paidDate || ''),
+      paidDate: U.parseDateStr(b.paidDate) ? String(b.paidDate) : '',
       note: String(b.note || '').trim(),
       createdAt: now.toISOString(),
     };
@@ -715,13 +772,20 @@ async function handle(method, pathname, url, body) {
     const amount = b.amount != null ? Number(b.amount) : cur.amount;
     if (!isFinite(amount) || amount < 0) return err('账单金额必须不小于 0');
     const paid = b.paid == null ? cur.paid : (b.paid === '已还' ? '已还' : '未还');
+    // 日期一律经真实校验；未显式传入时沿用旧值（旧值若非法则清空/回填今天）
+    const dueDate = b.dueDate != null
+      ? (U.parseDateStr(b.dueDate) ? String(b.dueDate) : '')
+      : (U.parseDateStr(cur.dueDate) ? cur.dueDate : '');
+    const paidDate = b.paidDate != null
+      ? (U.parseDateStr(b.paidDate) ? String(b.paidDate) : '')
+      : (paid === '已还' ? (U.parseDateStr(cur.paidDate) ? cur.paidDate : U.todayStr()) : '');
     bills[i] = {
       ...cur,
       amount: Math.round(amount * 100) / 100,
-      dueDate: b.dueDate != null ? String(b.dueDate) : cur.dueDate,
+      dueDate,
       paid,
       // 标记已还且未填还款日期时自动填今天；改回未还则清空
-      paidDate: b.paidDate != null ? String(b.paidDate) : (paid === '已还' ? (cur.paidDate || U.todayStr()) : ''),
+      paidDate,
       note: b.note != null ? String(b.note).trim() : cur.note,
     };
     store.write('bills', bills);
@@ -835,13 +899,17 @@ function validCount(v) {
 }
 
 function normalizeBenefits(benefits, fallbackNames) {
-  if (Array.isArray(benefits) && benefits.length) {
+  // 只看「是不是数组」而不是「有没有元素」：编辑时把权益全部删掉会提交 []，
+  // 若把空数组也当成「未提供」，卡种默认权益就会复活，用户永远删不干净
+  if (Array.isArray(benefits)) {
     return benefits.map((b) => {
       const rawTotal = Math.round(Number(b.total));
       const total = isFinite(rawTotal) ? (rawTotal < 0 ? -1 : rawTotal) : 1; // -1 = 不限次
       const type = String(b.type || b.benefitType || '').trim();
       const validUntil = U.parseDateStr(b.validUntil) ? String(b.validUntil) : '';
       return {
+        // 稳定 id：权益可增删/重排，若使用记录只认索引会整体错位（B 继承 A 的历史）
+        id: (typeof b.id === 'string' && b.id) ? b.id : U.uid(),
         name: String(b.name || '').trim() || '权益',
         type: BENEFIT_TYPES.includes(type) ? type : (type || ''),
         total,
@@ -851,7 +919,19 @@ function normalizeBenefits(benefits, fallbackNames) {
     }).filter((b) => b.name);
   }
   // 未填写时按卡种权益默认：次数 1、自然年
-  return (fallbackNames || []).map((name) => ({ name, total: 1, resetCycle: '自然年' }));
+  return (fallbackNames || []).map((name) => ({ id: U.uid(), name, total: 1, resetCycle: '自然年' }));
+}
+
+// 定位权益：优先按稳定 id（增删/重排后索引会前移，仅按索引会错配记录）；无 id 时回退索引
+function resolveBenefit(mc, idx, bid) {
+  const bens = mc.benefits || [];
+  if (bid) {
+    const i = bens.findIndex((b) => b && b.id === bid);
+    if (i < 0) return null;
+    return { idx: i, bid: bens[i].id };
+  }
+  if (!Number.isInteger(idx) || idx < 0 || idx >= bens.length) return null;
+  return { idx, bid: bens[idx].id || '' };
 }
 
 // 提醒检查：force=true 时忽略节流（手动触发）；否则按 intervalMinutes 节流
@@ -900,5 +980,5 @@ function syncMyCardSnapshots() {
 
 module.exports = {
   init, handle, runNotifyChecks,
-  _internals: { computeMyCard, computeStats, benefitUsed, benefitHistory, waiverState, normalizeCard, cardKey, buildIndexes },
+  _internals: { computeMyCard, computeStats, benefitUsed, benefitHistory, waiverState, normalizeCard, normalizeBenefits, cardKey, buildIndexes, resolveBenefit },
 };

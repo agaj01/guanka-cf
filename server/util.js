@@ -31,8 +31,14 @@ function todayStr() { return toDateStr(new Date()); }
 function parseDateStr(s) {
   const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return null;
-  const d = new Date(+m[1], +m[2] - 1, +m[3]);
-  return isNaN(d.getTime()) ? null : d;
+  const y = +m[1];
+  const mo = +m[2];
+  const d = +m[3];
+  const dt = new Date(y, mo - 1, d);
+  // 严格校验真实性：Date 会把 2026-02-30 静默进位成 03-02、2026-13-01 进位到次年，
+  // 只比对回读值才能识别出这类不存在的日期（否则脏日期入库并污染按月统计）
+  if (isNaN(dt.getTime()) || dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+  return dt;
 }
 
 function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
@@ -43,11 +49,18 @@ function daysBetween(fromStr, to) {
   return Math.round((startOfDay(to) - startOfDay(a)) / 86400000);
 }
 
+// 按目标年份取年费日：日超当月天数时收到月末（如 2月29 在平年 → 2月28），避免 Date 静默滚月
+function feeDateIn(year, feeMonth, feeDay) {
+  const m = Math.min(12, Math.max(1, Math.round(Number(feeMonth) || 1)));
+  const d = Math.min(daysInMonth(year, m), Math.max(1, Math.round(Number(feeDay) || 1)));
+  return new Date(year, m - 1, d);
+}
+
 // 下一个年费收取日（>= 今天）
 function nextFeeDate(feeMonth, feeDay, now) {
   const y = now.getFullYear();
-  let d = new Date(y, feeMonth - 1, feeDay);
-  if (startOfDay(d) < startOfDay(now)) d = new Date(y + 1, feeMonth - 1, feeDay);
+  let d = feeDateIn(y, feeMonth, feeDay);
+  if (startOfDay(d) < startOfDay(now)) d = feeDateIn(y + 1, feeMonth, feeDay);
   return d;
 }
 
@@ -73,8 +86,8 @@ function feeCountdown(feeMonth, feeDay, now) {
 // 卡年起点：最近一个已过去的年费日（用于刷免进度统计区间）
 function cardYearStart(feeMonth, feeDay, now) {
   const y = now.getFullYear();
-  let d = new Date(y, feeMonth - 1, feeDay);
-  if (d > now) d = new Date(y - 1, feeMonth - 1, feeDay);
+  let d = feeDateIn(y, feeMonth, feeDay);
+  if (d > now) d = feeDateIn(y - 1, feeMonth, feeDay);
   return d;
 }
 

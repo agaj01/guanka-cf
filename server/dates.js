@@ -14,8 +14,9 @@ function dateStr(d) {
   return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
 }
 
-function atDay(y, m, d) { // m: 0-11
-  return new Date(y, m, Math.min(d, daysInMonth(y, m + 1)));
+function atDay(y, m, d) { // m: 0-11，日超当月天数时钳到月末（防止 Date 静默滚月）
+  const max = daysInMonth(y, m + 1);
+  return new Date(y, m, Math.min(Math.max(1, Math.round(Number(d) || 1)), max));
 }
 
 function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }

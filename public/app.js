@@ -876,7 +876,7 @@ function bindDrawerEvents(m) {
       const n = parseInt(input.value, 10);
       if (!n || n <= 0) return toast('请输入大于 0 的次数', 'error');
       try {
-        await api('/api/mycards/' + m.id + '/benefits/' + idx + '/count', { method: 'POST', body: { date: today(), count: n } });
+        await api('/api/mycards/' + m.id + '/benefits/' + idx + '/count', { method: 'POST', body: { date: today(), count: n, bid: b.id || '' } });
         toast('已补录 ' + n + ' 次');
         await loadAll();
       } catch (e) { toast(e.message, 'error'); }
@@ -1005,7 +1005,7 @@ function myCardFormHtml(c, m) {
 function benefitEditRow(b, i) {
   const cycles = state.meta.resetCycles || [];
   const types = state.meta.benefitTypes || [];
-  return '<div class="benefit-row" data-i="' + i + '">' +
+  return '<div class="benefit-row" data-i="' + i + '" data-bid="' + esc(b.id || '') + '">' +
     '<input class="b-name" placeholder="权益名称" value="' + esc(b.name) + '">' +
     '<select class="b-type"><option value="">类型（选填）</option>' +
     types.map((t) => '<option' + (t === (b.type || b.benefitType) ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>' +
@@ -1034,7 +1034,9 @@ function collectBenefits(form) {
   return $$('.benefit-row', form).map((row) => {
     const raw = parseInt($('.b-total', row).value, 10);
     const total = isNaN(raw) ? 1 : (raw < 0 ? -1 : raw); // -1 = 不限次
+    const bid = row.dataset.bid || '';
     return {
+      id: bid, // 稳定 id：权益增删/重排后使用记录仍能对上（空 = 新建，由服务端分配）
       name: $('.b-name', row).value.trim(),
       type: ($('.b-type', row) && $('.b-type', row).value) || '',
       total,
@@ -1207,7 +1209,7 @@ function openBenefitModal(m, idx) {
   $('#btn-save-benefit').addEventListener('click', async () => {
     try {
       await api('/api/mycards/' + m.id + '/benefits/' + idx + '/usage', {
-        method: 'POST', body: { date: $('#b-date').value, note: $('#b-note').value.trim() },
+        method: 'POST', body: { date: $('#b-date').value, note: $('#b-note').value.trim(), bid: b.id || '' },
       });
       toast('已记录');
       closeModal();
@@ -1219,7 +1221,7 @@ function openBenefitModal(m, idx) {
 async function openBenefitHistoryModal(m, idx) {
   const b = (m.benefits || [])[idx];
   let groups;
-  try { groups = await api('/api/mycards/' + m.id + '/benefits/' + idx + '/history'); }
+  try { groups = await api('/api/mycards/' + m.id + '/benefits/' + idx + '/history?bid=' + encodeURIComponent(b.id || '')); }
   catch (e) { return toast(e.message, 'error'); }
   const body = groups.length
     ? groups.map((g) =>

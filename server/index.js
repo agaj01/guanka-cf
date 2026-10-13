@@ -9,7 +9,7 @@ const routes = require('./routes');
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
-const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
 
 const store = new Store(DATA_DIR);
 routes.init(store);
@@ -68,9 +68,14 @@ function send(res, status, data, headers) {
 }
 
 function serveStatic(res, pathname) {
+  // NUL 字节会让 fs 调用抛异常；直接当非法路径处理
+  if (pathname.includes('\0')) { send(res, 400, { error: 'Bad request' }); return; }
   let fp = path.normalize(path.join(PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname));
-  if (!fp.startsWith(PUBLIC_DIR)) { send(res, 403, { error: 'Forbidden' }); return; }
-  if (!fs.existsSync(fp) || !fs.statSync(fp).isFile()) fp = path.join(PUBLIC_DIR, 'index.html');
+  // 注意必须带上路径分隔符比较：只写 startsWith(PUBLIC_DIR) 会把同级目录 public-x/ 也放行
+  if (fp !== PUBLIC_DIR && !fp.startsWith(PUBLIC_DIR + path.sep)) { send(res, 403, { error: 'Forbidden' }); return; }
+  let isFile = false;
+  try { isFile = fs.statSync(fp).isFile(); } catch (e) { isFile = false; }
+  if (!isFile) fp = path.join(PUBLIC_DIR, 'index.html');
   const ext = path.extname(fp).toLowerCase();
   fs.readFile(fp, (e, data) => {
     if (e) { send(res, 404, { error: 'Not found' }); return; }
