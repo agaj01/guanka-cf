@@ -101,16 +101,15 @@ async function buildCommit(localCommitSha, baseTreeMap, parentSha) {
     up++;
     console.log('  ↑ ' + p);
   }
-  // 删除远端有而本提交没有的文件
+  // 删除远端有而本提交没有的文件。
+  // 注意：不传 base_tree 时，本 tree 数组即为完整快照，未列出的文件天然被移除，
+  // 无需再补 `sha: null` 条目（补了反而会触发 GitHub 422 GitRPC::BadObjectState）。
   for (const p of baseTreeMap.keys()) {
     if (!local.has(p)) console.log('  × ' + p + '（该提交中已删除）');
   }
 
   const entries = [];
   for (const [p, sha] of local) entries.push({ path: p, mode: '100644', type: 'blob', sha });
-  for (const p of baseTreeMap.keys()) {
-    if (!local.has(p)) entries.push({ path: p, mode: '100644', type: 'blob', sha: null });
-  }
   const t = await gh('POST', '/repositories/' + REPO_ID + '/git/trees', { tree: entries });
   const c = await gh('POST', '/repositories/' + REPO_ID + '/git/commits', {
     message: meta.msg,

@@ -33,36 +33,6 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 
 首次启动自动写入内置卡种库（83 张常见卡 / 15 家银行，示例数据），无需任何配置。
 
-## 直接使用 Docker Hub 镜像（免构建）
-
-镜像由 GitHub Actions 自动构建并推送（amd64 + arm64 双架构，群晖等 ARM 机型可直接拉取）：
-
-```bash
-# 拉取并运行（把 <你的DockerHub用户名> 换成实际账号，如 folkson）
-docker run -d --name credit-card-manager \
-  -p 3000:3000 \
-  -v guanka-data:/app/data \
-  --restart unless-stopped \
-  <你的DockerHub用户名>/credit-card-manager:latest
-
-# 浏览器打开
-http://localhost:3000
-```
-
-群晖 NAS（Container Manager）等场景同样适用——arm64 与 amd64 架构会自动选择对应层。
-
-### 发布新版本镜像
-
-```bash
-git tag v1.0.1 && git push origin v1.0.1
-```
-
-打 tag 推送后 CI 自动构建并推送 `1.0.1` / `1.0` / `1` / `latest` 四个标签；
-也可在 GitHub Actions 页面对 `Build & Push Docker Hub` 手动 Run workflow（构建 `latest`）。
-
-> 仓库 Secrets 需配置 `DOCKERHUB_USERNAME`（Docker Hub 用户名）与 `DOCKERHUB_TOKEN`
-> （Docker Hub → Account Settings → Personal access tokens 生成的 Access Token，建议只给 Read/Write 权限）。
-
 ## 功能一览（与原版对照）
 
 | 模块 | 功能 |
@@ -183,11 +153,19 @@ DATA_DIR=./data node server/index.js
 
 ## 开发自检（可选）
 
-`tools/ui-test.js` 是一套基于 jsdom 的前端逻辑自动化验证（39 项断言：页面渲染、抽屉、
-记一笔、补录、权益超限拦截、编辑持卡、卡种库、主题切换、完整添加持卡流程等）：
+三套自动化验证脚本，均无需额外依赖（`ui-test` 需 jsdom）：
+
+| 脚本 | 覆盖范围 | 断言数 |
+|------|---------|--------|
+| `tools/dates-test.js` | 日期引擎：账单/还款日推导、宽限期选期、预警分级、跨年闰日钳制 | 39 |
+| `tools/notify-test.js` | 提醒引擎：三通道推送、去重、年费达标判定、权益生命周期与接口边界 | 70 |
+| `tools/ui-test.js` | 前端逻辑：页面渲染、抽屉、记一笔、补录、权益超限拦截、编辑持卡、卡种库、主题切换 | 52 |
 
 ```bash
-npm i -g jsdom                       # 或装到任意目录
+node tools/dates-test.js             # 纯逻辑，直接跑
+node tools/notify-test.js            # 内置 mock 服务，直接跑
+
+npm i -g jsdom                       # ui-test 需要 jsdom
 node server/index.js &               # 先起服务
 NODE_PATH=<jsdom所在node_modules> node tools/ui-test.js
 ```
