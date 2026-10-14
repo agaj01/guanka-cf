@@ -19,6 +19,38 @@ function getBillGroups() { return store.readArray('billGroups'); }
 // 避免 normalizeConfig 拿到非对象后把 sentLog/history 一起丢掉。
 function getNotifyRaw() { return store.readObject('notify', null); }
 
+/* ---------------- 推送凭证掩码 ----------------
+ * 接口一律不回传真值，只回「•••• + 末 4 位」；前端把它填进输入框，用户不改动就原样提交，
+ * PUT 侧识别出掩码语义并保留磁盘原值。这样既不影响「看着有值」的交互，又不制造泄露面。
+ */
+const NOTIFY_SECRET_FIELDS = {
+  wxpusher: ['appToken'],
+  serverchan: ['sendkey'],
+  bark: ['deviceKey'],
+};
+const MASK_PREFIX = '••••';
+
+function isMaskedSecret(v) {
+  return typeof v === 'string' && v.startsWith(MASK_PREFIX);
+}
+function maskSecret(v) {
+  const s = String(v || '');
+  if (!s) return '';
+  return s.length <= 4 ? MASK_PREFIX : MASK_PREFIX + s.slice(-4);
+}
+/** 深拷贝一份并把凭证替换为掩码，避免污染 store 缓存里的真实对象 */
+function maskNotifySecrets(cfg) {
+  const clone = JSON.parse(JSON.stringify(cfg || {}));
+  for (const ch of Object.keys(NOTIFY_SECRET_FIELDS)) {
+    const c = clone.channels && clone.channels[ch];
+    if (!c) continue;
+    for (const f of NOTIFY_SECRET_FIELDS[ch]) {
+      if (c[f]) c[f] = maskSecret(c[f]);
+    }
+  }
+  return clone;
+}
+
 function groupNameOf(groupId) {
   if (!groupId) return '';
   const g = getBillGroups().find((x) => x.id === groupId);
@@ -471,7 +503,7 @@ function matchRoute(method, pathname) {
   return null;
 }
 
-async function handle(method, pathname, url, body) {
+async function handle(method, pathname, url, body, req) {
   const match = matchRoute(method, pathname);
   if (!match) return undefined;
   const now = new Date();
@@ -479,7 +511,14 @@ async function handle(method, pathname, url, body) {
   // ---- 基础 ----
   if (pathname === '/api/health') return json({ ok: true, version: '1.0.0', time: now.toISOString() });
   if (pathname === '/api/meta') return json({ channels: CHANNELS, categories: CATEGORIES, waiverTypes: WAIVER_TYPES, resetCycles: RESET_CYCLES, benefitTypes: BENEFIT_TYPES, csvHeader: CSV_HEADER });
-  if (pathname === '/api/shutdown') return { shutdown: true };
+  if (pathname === '/api/shutdown') {
+    // 需要鉴权（由 index.js 的 auth.guard 保证）；此处再加一层同源校验，
+    // 阻断「隐藏表单 POST 到 /api/shutdown」这类 CSRF（GET/跨站来源一律拒绝）
+    if (req && !require('./auth').sameOrigin(req)) {
+      return err('拒绝跨站请求', 403);
+    }
+    return { shutdown: true };
+  }
 
   // ---- 设置 ----
   if (pathname === '/api/settings' && method === 'GET') return json(store.readObject('settings', {}));
@@ -1009,16 +1048,37 @@ async function handle(method, pathname, url, body) {
 
   // ---- 提醒功能 ----
   if (pathname === '/api/notify/config' && method === 'GET') {
-    return json(reminder.normalizeConfig(getNotifyRaw()));
+    // 推送 token 一律不回传真值。
+    // 关键背景：normalizeConfig 会把「环境变量注入的 token」合并进返回对象，而 README
+    // 恰恰建议「token 别填 UI、改用环境变量更安全」——若这里原样返回，那条无鉴权 GET
+    // 就会把「更安全做法」的成果原样吐出，安全性被拉平到与明文落盘一致。
+    return json(maskNotifySecrets(reminder.normalizeConfig(getNotifyRaw())));
   }
   if (pathname === '/api/notify/config' && method === 'PUT') {
-    const cfg = reminder.normalizeConfig(Object.assign({}, getNotifyRaw(), body || {}, {
+    const raw = getNotifyRaw() || {};
+    const incoming = body || {};
+    // 前端回填的是掩码串；用户没改动时应保留磁盘上的原值，不能把掩码写进去
+    const existing = reminder.normalizeConfig(raw);
+    if (incoming.channels && typeof incoming.channels === 'object') {
+      for (const ch of Object.keys(NOTIFY_SECRET_FIELDS)) {
+        const inCh = incoming.channels[ch];
+        if (!inCh || typeof inCh !== 'object') continue;
+        for (const f of NOTIFY_SECRET_FIELDS[ch]) {
+          if (f in inCh && isMaskedSecret(inCh[f])) {
+            const old = (existing.channels[ch] || {})[f];
+            // 有原值 → 沿用；前端提交空掩码且磁盘也没值 → 置空
+            inCh[f] = old || '';
+          }
+        }
+      }
+    }
+    const cfg = reminder.normalizeConfig(Object.assign({}, raw, incoming, {
       // sentLog/history 不能被前端覆盖，只允许通过 check 结果更新
-      sentLog: (getNotifyRaw() || {}).sentLog || {},
-      history: (getNotifyRaw() || {}).history || [],
+      sentLog: raw.sentLog || {},
+      history: raw.history || [],
     }));
     store.write('notify', cfg);
-    return json(cfg);
+    return json(maskNotifySecrets(cfg));
   }
   if (pathname === '/api/notify/test' && method === 'POST') {
     const cfg = reminder.normalizeConfig(getNotifyRaw());

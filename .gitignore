@@ -16,6 +16,10 @@ data/*.tmp
 .r7probe*.js
 .r7probe*-data/
 .r7probe-data/
+.t-data/
+.t-data2/
+.t-data3/
+.b-data/
 *.log
 
 # 依赖与系统文件

@@ -4,11 +4,22 @@ services:
     image: credit-card-manager:1.0.0
     container_name: credit-card-manager
     ports:
-      - "3000:3000"          # 浏览器访问 http://localhost:3000
+      # 只绑到宿主机回环：默认仅本机可访问，避免 Docker 的端口映射直接对所有网卡放行
+      # （iptables -A DOCKER -j ACCEPT，且会绕过部分宿主机防火墙规则）。
+      # 需要在局域网访问时改成 "3000:3000"，并**务必**同时设置下面的 AUTH_TOKEN。
+      - "127.0.0.1:3000:3000"
     volumes:
       - guanka-data:/app/data   # 持卡、消费、权益数据持久化
+    environment:
+      # 访问令牌：设置后浏览器首次访问需输入该值，之后凭会话 Cookie 免登录。
+      # 不设置时服务只允许本机（回环）访问，局域网/公网一律拒绝。
+      # 生成方法：node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
+      # 若在反向代理上启用了 HTTPS，设为 1 以给会话 Cookie 加上 Secure 属性
+      - TRUST_HTTPS=${TRUST_HTTPS:-0}
+      # 需要人类可读的缩进 JSON（排查数据问题）时设为 1
+      - PRETTY_JSON=${PRETTY_JSON:-0}
     restart: unless-stopped
-    # 如需改端口，把上面改成 "8080:3000" 这样访问 http://localhost:8080
 
 volumes:
   guanka-data:

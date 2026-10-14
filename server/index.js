@@ -3,10 +3,15 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
+const crypto = require('crypto');
 const { Store } = require('./db');
 const routes = require('./routes');
+const auth = require('./auth');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
+// 默认仍监听所有网卡（容器内必须如此，否则端口映射收不到请求），
+// 但**访问控制**改由 auth.guard 负责：未配置 AUTH_TOKEN 时只放行回环来源。
 const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
@@ -38,16 +43,111 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-function readBody(req) {
+/* ---------------- 静态资源：启动时预载 + 预压缩 + ETag ----------------
+ * 原实现每个请求都 fs.readFile 重读磁盘、无内容协商压缩、且发 Cache-Control: no-cache
+ * （语义是「每次都必须重新下载」）。实测 app.js 84,616 B → gzip 21,945 B，可省 74% 带宽；
+ * 而 no-cache 让每次刷新都全量重传这 84KB。这些文件在运行时不会变，一次性读入内存即可。
+ */
+const STATIC = new Map();
+const COMPRESSIBLE = new Set(['.html', '.css', '.js', '.json', '.svg', '.txt']);
+(function preloadStatic() {
+  let files;
+  try { files = fs.readdirSync(PUBLIC_DIR); } catch (e) { return; }
+  for (const name of files) {
+    const abs = path.join(PUBLIC_DIR, name);
+    let buf;
+    try {
+      if (!fs.statSync(abs).isFile()) continue;
+      buf = fs.readFileSync(abs);
+    } catch (e) { continue; }
+    const ext = path.extname(name).toLowerCase();
+    const entry = {
+      raw: buf,
+      etag: '"' + crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16) + '"',
+      type: MIME[ext] || 'application/octet-stream',
+      compressible: COMPRESSIBLE.has(ext),
+    };
+    // 小于 1KB 不值得压缩（gzip 头开销会抵消收益）
+    if (entry.compressible && buf.length > 1024) {
+      try { entry.gz = zlib.gzipSync(buf, { level: 6 }); } catch (e) { /* 保留未压缩 */ }
+    }
+    STATIC.set('/' + name, entry);
+  }
+})();
+
+function serveStatic(req, res, pathname) {
+  if (pathname.includes('\0')) { send(res, 400, { error: 'Bad request' }); return; }
+  const fp = path.normalize(path.join(PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname));
+  // 注意必须带上路径分隔符比较：只写 startsWith(PUBLIC_DIR) 会把同级目录 public-x/ 也放行
+  if (fp !== PUBLIC_DIR && !fp.startsWith(PUBLIC_DIR + path.sep)) { send(res, 403, { error: 'Forbidden' }); return; }
+
+  const rel = '/' + path.relative(PUBLIC_DIR, fp).split(path.sep).join('/');
+  let entry = STATIC.get(rel);
+  if (!entry) {
+    // 未预载（启动后新增的文件）或路径不是文件：回落到 SPA 入口
+    entry = STATIC.get('/index.html');
+    if (!entry) { send(res, 404, { error: 'Not found' }); return; }
+  }
+
+  const headers = {
+    'Content-Type': entry.type,
+    'Cache-Control': 'public, max-age=3600',
+    'ETag': entry.etag,
+    'Vary': 'Accept-Encoding',
+  };
+
+  // 条件请求：内容未变直接 304，省掉整个响应体
+  const inm = req.headers['if-none-match'];
+  if (inm && inm.split(',').some((v) => v.trim() === entry.etag)) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+
+  const accept = req.headers['accept-encoding'] || '';
+  if (entry.gz && /\bgzip\b/.test(accept)) {
+    headers['Content-Encoding'] = 'gzip';
+    res.writeHead(200, headers);
+    res.end(entry.gz);
+    return;
+  }
+  res.writeHead(200, headers);
+  res.end(entry.raw);
+}
+
+/* ---------------- 请求体 ---------------- */
+const MAX_BODY = 20 * 1024 * 1024;
+
+function readBody(req, res) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let aborted = false;
     req.on('data', (c) => {
       size += c.length;
-      if (size > 20 * 1024 * 1024) { reject(new Error('请求体过大')); req.destroy(); return; }
+      if (size > MAX_BODY) {
+        // 原实现直接 req.destroy()：客户端只看到 ECONNRESET 拿不到 413，
+        // 服务端的错误也因连接已断而写不回去。这里先应答再断开。
+        if (!aborted) {
+          aborted = true;
+          try {
+            const payload = JSON.stringify({ error: '请求体过大（上限 ' + (MAX_BODY / 1024 / 1024) + 'MB）' });
+            res.writeHead(413, {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Content-Length': Buffer.byteLength(payload),
+              'Connection': 'close',
+            });
+            res.end(payload);
+          } catch (_) { /* 响应可能已发出 */ }
+          req.destroy();
+          reject(new Error('请求体过大'));
+        }
+        return;
+      }
       chunks.push(c);
     });
     req.on('end', () => {
+      if (aborted) return;
       const raw = Buffer.concat(chunks).toString('utf8');
       const ct = req.headers['content-type'] || '';
       if (ct.includes('application/json')) {
@@ -56,31 +156,68 @@ function readBody(req) {
         resolve(raw);
       }
     });
-    req.on('error', reject);
+    req.on('error', (e) => { if (!aborted) reject(e); });
   });
 }
 
 function send(res, status, data, headers) {
+  if (res.headersSent) return;
   const isObj = typeof data === 'object' && data !== null && !Buffer.isBuffer(data);
   const payload = isObj ? JSON.stringify(data) : String(data);
   res.writeHead(status, Object.assign({ 'Content-Type': isObj ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8' }, headers || {}));
   res.end(payload);
 }
 
-function serveStatic(res, pathname) {
-  // NUL 字节会让 fs 调用抛异常；直接当非法路径处理
-  if (pathname.includes('\0')) { send(res, 400, { error: 'Bad request' }); return; }
-  let fp = path.normalize(path.join(PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname));
-  // 注意必须带上路径分隔符比较：只写 startsWith(PUBLIC_DIR) 会把同级目录 public-x/ 也放行
-  if (fp !== PUBLIC_DIR && !fp.startsWith(PUBLIC_DIR + path.sep)) { send(res, 403, { error: 'Forbidden' }); return; }
-  let isFile = false;
-  try { isFile = fs.statSync(fp).isFile(); } catch (e) { isFile = false; }
-  if (!isFile) fp = path.join(PUBLIC_DIR, 'index.html');
-  const ext = path.extname(fp).toLowerCase();
-  fs.readFile(fp, (e, data) => {
-    if (e) { send(res, 404, { error: 'Not found' }); return; }
-    send(res, 200, data, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
-  });
+/* ---------------- 登录 / 会话 ---------------- */
+const LOGIN_MAX_TRIES = 5;
+const LOGIN_LOCK_MS = 60 * 1000;
+const loginFails = new Map(); // ip -> { count, until }
+
+function loginLocked(ip) {
+  const rec = loginFails.get(ip);
+  if (!rec || !rec.until) return 0;
+  if (Date.now() < rec.until) return Math.ceil((rec.until - Date.now()) / 1000);
+  loginFails.delete(ip);
+  return 0;
+}
+function noteLoginFail(ip) {
+  const rec = loginFails.get(ip) || { count: 0, until: 0 };
+  rec.count++;
+  if (rec.count >= LOGIN_MAX_TRIES) { rec.until = Date.now() + LOGIN_LOCK_MS; rec.count = 0; }
+  loginFails.set(ip, rec);
+}
+
+// @returns {true} 已处理；{false} 交给后续路由
+async function handleAuthRoutes(req, res, pathname, urlObj) {
+  const ip = (req.socket && req.socket.remoteAddress) || '?';
+
+  if (pathname === '/api/auth/status') {
+    // 只回「是否需要登录 / 当前是否已授权」，不回任何敏感信息
+    const blocked = auth.authEnabled() ? !auth.checkToken(auth.credentialOf(req, urlObj)) : !auth.isLoopback(req);
+    send(res, 200, { authRequired: auth.authEnabled(), authorized: !blocked });
+    return true;
+  }
+  if (pathname === '/api/auth/login' && req.method === 'POST') {
+    const wait = loginLocked(ip);
+    if (wait) { send(res, 429, { error: '尝试过于频繁，请 ' + wait + ' 秒后重试' }); return true; }
+    if (!auth.authEnabled()) { send(res, 400, { error: '服务未设置 AUTH_TOKEN，无需登录' }); return true; }
+    let body = {};
+    try { body = await readBody(req, res); } catch (e) { send(res, 413, { error: e.message }); return true; }
+    const token = (body && typeof body === 'object' && body.token) || '';
+    if (!auth.checkToken(String(token).trim())) {
+      noteLoginFail(ip);
+      send(res, 401, { error: '令牌不正确' });
+      return true;
+    }
+    loginFails.delete(ip);
+    send(res, 200, { ok: true }, { 'Set-Cookie': auth.sessionCookie() });
+    return true;
+  }
+  if (pathname === '/api/auth/logout' && req.method === 'POST') {
+    send(res, 200, { ok: true }, { 'Set-Cookie': auth.clearCookie() });
+    return true;
+  }
+  return false;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -97,11 +234,21 @@ const server = http.createServer(async (req, res) => {
   }
   try {
     if (pathname.startsWith('/api/')) {
+      // 登录/登出/状态：不参与鉴权守卫
+      if (pathname.startsWith('/api/auth/')) {
+        if (await handleAuthRoutes(req, res, pathname, urlObj)) return;
+        send(res, 404, { error: 'Not found' });
+        return;
+      }
+      // 鉴权守卫：健康检查放行；其余按 AUTH_TOKEN / 回环规则判定
+      const blocked = auth.guard(req, urlObj, pathname);
+      if (blocked) { send(res, blocked.status, blocked.body); return; }
+
       let body = {};
       if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') {
-        body = await readBody(req);
+        body = await readBody(req, res);
       }
-      const result = await routes.handle(req.method, pathname, urlObj, body);
+      const result = await routes.handle(req.method, pathname, urlObj, body, req);
       if (result === undefined) { send(res, 404, { error: 'Not found' }); return; }
       if (result.shutdown) {
         send(res, 200, { ok: true, msg: '管卡服务正在安全退出…' });
@@ -119,13 +266,13 @@ const server = http.createServer(async (req, res) => {
         });
         return;
       }
-      send(res, result.status || 200, result.body);
+      send(res, result.status || 200, result.body, result.headers);
       return;
     }
-    serveStatic(res, pathname);
+    serveStatic(req, res, pathname);
   } catch (e) {
     console.error('[管卡] 请求处理错误:', e);
-    send(res, e.status || 500, { error: e.message || '服务器内部错误' });
+    if (!res.headersSent) send(res, e.status || 500, { error: e.message || '服务器内部错误' });
   }
 });
 
@@ -135,6 +282,15 @@ server.listen(PORT, HOST, () => {
   console.log('  管卡 — 信用卡管理工具（Docker 版）已启动');
   console.log('  访问地址: http://localhost:' + PORT);
   console.log('  数据目录: ' + DATA_DIR + '（卡种库 ' + cards.length + ' 张）');
+  if (auth.authEnabled()) {
+    console.log('  访问控制: 已启用 AUTH_TOKEN（首次访问需输入令牌）');
+  } else {
+    console.log('  访问控制: 未设置 AUTH_TOKEN → 仅允许本机访问');
+    console.log('            如需局域网/公网使用，请先设置 AUTH_TOKEN 环境变量');
+  }
+  if (store.warnings && store.warnings.length) {
+    console.log('  数据告警: ' + store.warnings.length + ' 条（详见上方日志）');
+  }
   console.log('============================================');
   startNotifyScheduler();
 });

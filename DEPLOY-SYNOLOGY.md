@@ -124,7 +124,11 @@ ls -la          # 确认 Dockerfile / docker-compose.yml 就在当前层
        image: credit-card-manager:1.0.0
        container_name: credit-card-manager
        ports:
-         - "3000:3000"
+         - "127.0.0.1:3000:3000"
+       environment:
+         # 强烈建议设置：留空则仅允许本机(回环)访问，局域网其它设备会被拒绝
+         AUTH_TOKEN: ${AUTH_TOKEN:-}
+         TRUST_HTTPS: ${TRUST_HTTPS:-0}
        volumes:
          - guanka-data:/app/data
        restart: unless-stopped
@@ -132,6 +136,14 @@ ls -la          # 确认 Dockerfile / docker-compose.yml 就在当前层
    volumes:
      guanka-data:
    ```
+
+   > **关于端口与 AUTH_TOKEN**：
+   > - 上面的 `127.0.0.1:3000:3000` 表示只在群晖本机暴露端口。若你要从局域网其它设备
+   >   （手机/电脑）访问，需改成 `"3000:3000"`，**并务必同时设置 `AUTH_TOKEN`**；
+   >   否则未设令牌时服务默认只接受回环访问，局域网请求会返回 403。
+   > - 设置令牌的方式：在源码目录建 `.env` 文件写入 `AUTH_TOKEN=你的随机长口令`，
+   >   compose 会自动读取；或在「项目」编辑界面的 **环境** 标签页里手动添加变量。
+   > - 令牌只在服务端保存，浏览器侧仅持有一个 HttpOnly 会话 Cookie，前端不存明文。
 
 4. 点 **验证**（群晖会检查 YAML 语法）→ 通过后点 **下一步**
 5. 勾选 **创建项目后立即启动** → 点 **完成**
@@ -334,14 +346,21 @@ sudo gunzip -c credit-card-manager-1.0.0.tar.gz | sudo docker load
 
 局域网内直接用 `http://群晖IP:3000` 即可。若要从公网访问：
 
-1. **强烈建议**加一层登录保护。本应用**没有内置账号密码**，任何人能访问到端口就等于拿到
-   全部信用卡数据。
-2. 推荐做法：不直接映射端口到公网，而是走群晖 **反向代理** + **HTTPS 证书** +
-   **访问控制**；或只在 SSH 隧道 / Tailscale / WireGuard 内网访问。
-3. 若必须暴露，请至少在 控制面板 → 安全性 中开启自动封锁、限制来源 IP，
-   并考虑在反代上加 Basic Auth。
+1. **必须设置 `AUTH_TOKEN`**。本应用默认在未配置令牌时只允许**回环（本机）访问**，
+   但从公网经过反向代理访问时，来源 IP 会被识别为非回环，请求会被 403 拒绝。
+   因此对外访问场景下请在 `.env` 里设置一个足够长的随机口令：
+   ```bash
+   AUTH_TOKEN=$(head -c 32 /dev/urandom | base64)
+   ```
+   写入 `docker-compose.yml` 同目录的 `.env`，然后 `sudo docker compose up -d`。
+   浏览器首次访问会弹出令牌输入框，输入即建立 HttpOnly 会话。
+2. 走群晖 **反向代理** + **HTTPS 证书** 时，同时设置 `TRUST_HTTPS=1`，
+   这样会话 Cookie 会带 `Secure` 标记，仅在 HTTPS 下回传。
+3. 推荐做法：不直接映射端口到公网；或只在 SSH 隧道 / Tailscale / WireGuard 内网访问。
+4. 若仍要暴露，请在 控制面板 → 安全性 中开启自动封锁、限制来源 IP，
+   并在反代上再加一层 Basic Auth。
 
-最简安全姿势：**不开外网，仅在家里的局域网用。**
+最简安全姿势：**不开外网，仅在家里的局域网用，同时设置 `AUTH_TOKEN`。**
 
 ---
 
@@ -353,9 +372,10 @@ sudo gunzip -c credit-card-manager-1.0.0.tar.gz | sudo docker load
 - [ ] `/volume1/docker/credit-card-manager` 目录已创建
 - [ ] 源码已上传且 `Dockerfile`、`docker-compose.yml`、`server/`、`public/` 在同一层
 - [ ] 未上传本地 `data/` 目录
+- [ ] 已设置 `AUTH_TOKEN`（局域网/公网访问必填；仅本机用可留空）
 - [ ] 项目已启动，`docker ps` 显示 `Up (healthy)`
 - [ ] `http://群晖IP:3000` 能打开，卡种库有 83 张卡
 - [ ] 数据落盘确认：`/volume1/@docker/volumes/guanka-data/_data/` 下有 JSON 文件
 - [ ] 已做一次备份到 `/volume1/docker/backup/`
 - [ ] （如用绑定挂载）已 `chown 1000:1000` 数据目录
-- [ ] （如需外网）已加反向代理 + HTTPS + 访问控制
+- [ ] （如需外网）已加反向代理 + HTTPS + `TRUST_HTTPS=1`

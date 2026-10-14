@@ -95,8 +95,9 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 | Server酱³ | SendKey（SCT/SCU 开头） | sct.ftqq.com |
 | Bark | deviceKey、服务器地址（自建填自己的）、级别、分组 | iOS Bark App 复制 key |
 
-**安全建议**：token 写在 UI 里会明文存到 `data/notify.json`。更安全的做法是不填 UI、
-改用环境变量（配置为空时自动回退）：
+**安全建议**：所有推送凭证（appToken / SendKey / deviceKey）在 API 响应中一律以掩码
+（`••••` + 末 4 位）返回，不会明文回传；但在磁盘 `data/notify.json` 上仍是明文。
+更安全的做法是不填 UI、改用环境变量注入（配置为空时自动回退），这样凭证完全不落盘：
 
 ```yaml
 services:
@@ -109,9 +110,57 @@ services:
       - BARK_DEVICE_KEY=xxxxx
 ```
 
+> 自建 Bark 服务请用 `NOTIFY_BARK_URL` 环境变量配置，不要填 UI 里的「服务器地址」——
+> 该字段会校验为 https 且禁止指向内网地址（防 SSRF）。
+
 - 去重：同一提醒（卡 + 周期 + 阈值）只推一次，避免刷屏
 - 单通道失败不影响其余通道，失败原因记在「最近推送记录」里
+- 上游返回非预期格式（HTTP 200 但不是 JSON）会被判为**失败**并写明原因，不会静默记成成功
 - 手动验证：设置页可「发送测试」与「立即检查」；也可 `curl -X POST http://localhost:3000/api/notify/check`
+  （启用 AUTH_TOKEN 时需带 `-H "Authorization: Bearer $AUTH_TOKEN"`）
+
+## 访问控制与安全
+
+**默认行为**：未设置 `AUTH_TOKEN` 时，服务**只允许本机（回环地址）访问**，局域网与公网来源
+一律返回 403。这样即使误把端口暴露出去，也不会被直接读取数据。
+
+**开放局域网/公网访问**：必须显式设置 `AUTH_TOKEN`：
+
+```bash
+# 1) 生成一个高强度令牌
+node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
+
+# 2) 写入 .env（与 docker-compose.yml 同目录）
+echo "AUTH_TOKEN=刚生成的令牌" > .env
+
+# 3) 把 docker-compose.yml 的端口绑定从 127.0.0.1:3000:3000 改成 3000:3000
+docker compose up -d
+```
+
+浏览器首次访问会弹出令牌输入框，登录后凭 HttpOnly 会话 Cookie 免登录（30 天）。
+命令行调用可改用请求头：`curl -H "Authorization: Bearer $AUTH_TOKEN" http://host:3000/api/mycards`。
+
+**其它已内置的防护**
+
+| 项 | 说明 |
+|---|---|
+| 端口默认只绑回环 | `docker-compose.yml` 用 `127.0.0.1:3000:3000`，避免 Docker 端口映射对所有网卡放行 |
+| 会话 Cookie | `HttpOnly`（XSS 偷不到）+ `SameSite=Lax`（阻断跨站表单 CSRF）；反代启用 HTTPS 时设 `TRUST_HTTPS=1` 追加 `Secure` |
+| 凭证掩码 | 推送 token 在 API 响应中只回末 4 位；掩码提交视为「不修改」，不会误覆盖 |
+| SSRF 防护 | Bark「服务器地址」必须 https 且不得解析到私有/环回/链路本地/保留网段 |
+| 关闭接口 | `POST /api/shutdown` 需鉴权，且拒绝跨站来源 |
+| 登录限速 | 同一 IP 连续 5 次令牌错误则锁定 60 秒 |
+| 请求体上限 | 超过 20MB 返回 **413**（原实现直接断连，客户端只看到连接重置） |
+| 路径穿越 | 静态文件目录逃逸拦截（带路径分隔符比较），畸形 URL 返回 400 且不影响进程存活 |
+
+## 性能说明
+
+- **静态资源**：启动时一次性读入内存并预压缩，`app.js` 传输从 86.8KB 降到 23.2KB（gzip 省 73%），
+  并启用 `ETag` 条件请求（内容未变返回 304，省掉整个响应体）与 `Cache-Control: max-age=3600`
+- **数据文件**：默认写紧凑 JSON（去缩进，体积省约 23%）。需要人类可读的缩进格式时设 `PRETTY_JSON=1`
+- **写入路径**：所有写操作是「读缓存数组 → 改 → 原样回写」，校验与写入之间没有 await 让出点，
+  因此并发写不会丢更新；代价是写入期间事件循环被同步 IO 阻塞（个人规模下无感，
+  数据量到数万条时「记一笔」的耗时会随文件大小线性增长）
 
 ## 合并账单（多卡共用一次提醒）
 

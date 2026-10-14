@@ -37,8 +37,70 @@ async function api(path, opts) {
   const ct = res.headers.get('content-type') || '';
   if (!ct.includes('json')) return res.text();
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || ('请求失败 ' + res.status));
+  // 未授权：统一弹登录框（服务端已把「需登录」标在 401/403 上）
+  if (!res.ok) {
+    if (data.needAuth || data.needToken) { showLogin(data.error); }
+    throw new Error(data.error || ('请求失败 ' + res.status));
+  }
   return data;
+}
+
+// ---------- 访问控制 ----------
+let loginShown = false;
+
+function showLogin(message) {
+  const root = $('#modal-root');
+  // 已展示则只更新提示，避免重复叠加登录层
+  if (loginShown && $('#login-token')) {
+    const tip = $('#login-tip');
+    if (tip && message) { tip.textContent = message; tip.style.display = ''; }
+    return;
+  }
+  loginShown = true;
+  root.innerHTML =
+    '<div class="modal-wrap" id="modal-wrap">' +
+    '<div class="modal" id="modal" style="width:min(420px,100%)">' +
+    '<div class="modal-header"><div class="modal-title">需要访问令牌</div></div>' +
+    '<div class="modal-body">' +
+    '<div style="font-size:13px;color:var(--text-2);line-height:1.7;margin-bottom:12px">' +
+    '本服务已启用访问控制。请输入启动容器时设置的 <code>AUTH_TOKEN</code> 环境变量的值。' +
+    '令牌只保存在服务端，浏览器仅持有一个 HttpOnly 会话 Cookie。' +
+    '</div>' +
+    '<input id="login-token" type="password" placeholder="AUTH_TOKEN" autocomplete="current-password" style="width:100%">' +
+    '<div id="login-tip" style="font-size:12px;color:var(--red);margin-top:8px;display:' + (message ? '' : 'none') + '">' + esc(message || '') + '</div>' +
+    '</div>' +
+    '<div class="modal-footer"><button class="btn primary" id="login-submit">登录</button></div>' +
+    '</div></div>';
+  const wrap = $('#modal-wrap');
+  requestAnimationFrame(() => { if (wrap.isConnected) wrap.classList.add('show'); });
+  const input = $('#login-token');
+  const submit = async () => {
+    const token = input.value.trim();
+    if (!token) { $('#login-tip').textContent = '请输入令牌'; $('#login-tip').style.display = ''; return; }
+    try {
+      await api('/api/auth/login', { method: 'POST', body: { token } });
+      loginShown = false;
+      $('#modal-root').innerHTML = '';
+      toast('已登录');
+      await loadAll();
+    } catch (e) {
+      $('#login-tip').textContent = e.message;
+      $('#login-tip').style.display = '';
+    }
+  };
+  $('#login-submit').addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  input.focus();
+}
+
+async function checkAuth() {
+  try {
+    const st = await api('/api/auth/status');
+    const btn = $('#btn-logout');
+    // 仅在「服务端启用了鉴权」时显示登出按钮；回环免登录模式下隐藏
+    if (btn) btn.style.display = st.authRequired ? '' : 'none';
+    return st;
+  } catch (e) { return { authRequired: false, authorized: true }; }
 }
 
 function toast(msg, type) {
@@ -95,14 +157,22 @@ const FEE_BADGE = { default: 'badge-default', yellow: 'badge-yellow', red: 'badg
 async function boot() {
   applyTheme(state.settings.theme);
   bindNav();
+  await checkAuth();
   await loadAll();
 }
 
 async function loadAll() {
   // mycards 响应已合并 stats/banks（服务端一次索引计算），省去一次全量统计请求
-  const [settings, meta, mycardsResp, cards, bills] = await Promise.all([
-    api('/api/settings'), api('/api/meta'), api('/api/mycards'), api('/api/cards'), api('/api/bills'),
-  ]);
+  let settings, meta, mycardsResp, cards, bills;
+  try {
+    [settings, meta, mycardsResp, cards, bills] = await Promise.all([
+      api('/api/settings'), api('/api/meta'), api('/api/mycards'), api('/api/cards'), api('/api/bills'),
+    ]);
+  } catch (e) {
+    // 未授权：showLogin 已由 api() 弹出，这里静默退出避免覆盖登录层
+    if (/未授权|非本地访问|令牌/.test(e.message)) return;
+    throw e;
+  }
   state.settings = settings;
   state.meta = meta;
   state.myCards = mycardsResp.data || mycardsResp;
@@ -125,6 +195,11 @@ function bindNav() {
   });
   $('#theme-toggle').addEventListener('click', toggleTheme);
   $('#btn-notify').addEventListener('click', openNotifyModal);
+  const logout = $('#btn-logout');
+  if (logout) logout.addEventListener('click', async () => {
+    try { await api('/api/auth/logout', { method: 'POST', body: {} }); } catch (e) { /* 忽略 */ }
+    location.reload();
+  });
 }
 
 // ---------- 主题 ----------
@@ -471,7 +546,28 @@ async function toggleAsset(id) {
 
 async function exportCards() {
   if (!state.myCards.length) return toast('还没有持卡可导出', 'error');
-  window.location = '/api/cards/export';
+  // 下载是浏览器直接发起的新导航，不经过 api()，因此需要手动带上会话凭据：
+  // 优先用 fetch + Blob（Cookie 自动携带），失败再退化为带 token 的 location 跳转。
+  try {
+    const res = await fetch('/api/cards/export');
+    if (!res.ok) {
+      const ct = res.headers.get('content-type') || '';
+      const msg = ct.includes('json') ? (await res.json()).error : ('导出失败 ' + res.status);
+      if (res.status === 401 || res.status === 403) showLogin(msg);
+      return toast(msg, 'error');
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'cards-export.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    toast('导出失败：' + e.message, 'error');
+  }
 }
 
 function showFeeExpiring() {
@@ -1556,5 +1652,7 @@ function field(label, inputHtml) {
 
 // ---------- 启动 ----------
 boot().catch((e) => {
-  $('#app').innerHTML = '<div class="empty-tip">加载失败：' + esc(e.message) + '</div>';
+  const app = $('#app');
+  if (!app) return;
+  app.innerHTML = '<div class="empty-tip">加载失败：' + esc(e.message) + '</div>';
 });
