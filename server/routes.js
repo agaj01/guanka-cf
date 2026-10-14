@@ -447,8 +447,8 @@ function benefitHistory(mc, idx, bid) {
 }
 
 // ---------- HTTP 辅助 ----------
-function json(obj, status) {
-  return { status: status || 200, body: obj };
+function json(obj, status, headers) {
+  return { status: status || 200, body: obj, headers: headers || undefined };
 }
 
 function err(msg, status) { return json({ error: msg }, status || 400); }
@@ -466,6 +466,8 @@ function matchRoute(method, pathname) {
     ['GET', /^\/api\/cards\/export$/],
     ['PUT', /^\/api\/cards\/([^/]+)$/],
     ['DELETE', /^\/api\/cards\/([^/]+)$/],
+    ['GET', /^\/api\/mycards\/export$/],
+    ['POST', /^\/api\/mycards\/import$/],
     ['GET', /^\/api\/mycards$/],
     ['POST', /^\/api\/mycards$/],
     ['PUT', /^\/api\/mycards\/([^/]+)$/],
@@ -611,6 +613,290 @@ async function handle(method, pathname, url, body, req) {
   }
 
   // ---- 我的持卡 ----
+  // 持卡备份导出：全量字段 JSON（含卡种快照、权益、消费/权益记录），供备份与跨实例迁移。
+  // 注意与 /api/cards/export（CSV，只含卡种库展示字段）的区别：那是「导出表格」，
+  // 这个是「数据备份」——两者并存服务不同场景。
+  if (pathname === '/api/mycards/export' && method === 'GET') {
+    const myCards = getMyCards();
+    const myIds = new Set(myCards.map((m) => m.id));
+    const cards = getCards();
+    // 卡种只导出「被持卡引用」的，未引用的卡种（含内置种子库）不属于个人数据
+    const usedCardIds = new Set(myCards.map((m) => m.cardId));
+    const payload = {
+      schema: 'guanka-backup',
+      version: 1,
+      exportedAt: now.toISOString(),
+      cardTypes: cards.filter((c) => usedCardIds.has(c.id)),
+      myCards,
+      consumptions: getConsumptions().filter((r) => myIds.has(r.myCardId)),
+      benefitRecords: getBenefits().filter((r) => myIds.has(r.myCardId)),
+      billGroups: getBillGroups(),
+      bills: getBills().filter((b) => myIds.has(b.myCardId)),
+    };
+    const filename = 'guanka-backup-' + U.todayStr() + '.json';
+    return json(payload, 200, { 'Content-Disposition': 'attachment; filename="' + filename + '"' });
+  }
+  // 持卡备份导入：两种模式——
+  //  merge（默认）：按 id 去重追加新记录，已存在的持卡/记录原样保留（适合备份恢复进现有实例）；
+  //  replace：先清空现有持卡数据再全量写入（适合迁移/回滚，调用方需明确传 mode）。
+  // 卡种按（银行|名称|组织|等级）四元组匹配已有库，匹配不上则自动创建新卡种。
+  if (pathname === '/api/mycards/import' && method === 'POST') {
+    const b = body && typeof body === 'object' ? body : {};
+    const data = b.data && typeof b.data === 'object' ? b.data : b;
+    if (data.schema !== 'guanka-backup') return err('不是有效的管卡备份文件（缺少 schema 标识）');
+    if (!Array.isArray(data.myCards)) return err('备份文件缺少 myCards 数据');
+    if (data.myCards.length > MAX_IMPORT_CARDS) return err('备份包含 ' + data.myCards.length + ' 张持卡，超出单次导入上限 ' + MAX_IMPORT_CARDS);
+
+    const mode = b.mode === 'replace' ? 'replace' : 'merge';
+    const cards = getCards();
+    const cardByKey = new Map(cards.map((c) => [cardKey(c), c]));
+    const cardById = new Map(cards.map((c) => [c.id, c]));
+
+    // —— 卡种映射/补建 ——
+    let cardTypesAdded = 0;
+    const importedCardTypes = [];
+    for (const c of Array.isArray(data.cardTypes) ? data.cardTypes : []) {
+      const key = cardKey(c || {});
+      if (!key.split('|').some(Boolean)) continue; // 银行名称全空的垃圾行跳过
+      const exist = cardByKey.get(key);
+      if (exist) { importedCardTypes.push({ srcId: String(c.id || ''), dstId: exist.id }); continue; }
+      const created = normalizeCard(c, null);
+      cards.push(created);
+      cardByKey.set(key, created);
+      cardById.set(created.id, created);
+      importedCardTypes.push({ srcId: String(c.id || ''), dstId: created.id });
+      cardTypesAdded++;
+    }
+    // srcCardId → 本库 cardId 的映射（同卡种多条映射取首个）
+    const cardIdMap = new Map();
+    for (const m of importedCardTypes) {
+      if (m.srcId && !cardIdMap.has(m.srcId)) cardIdMap.set(m.srcId, m.dstId);
+    }
+
+    // —— 记录 id 池（merge 模式下用于「已存在即跳过」的幂等判断；replace 模式现有数据即将清空）——
+    const existingMyIds = new Set(mode === 'merge' ? getMyCards().map((m) => m.id) : []);
+    const existingConsIds = new Set(mode === 'merge' ? getConsumptions().map((r) => r.id) : []);
+    const existingBenIds = new Set(mode === 'merge' ? getBenefits().map((r) => r.id) : []);
+
+    // —— 持卡归一 ——
+    // 备份里的持卡是已归一过的记录，但仍要走一遍防御性归一：
+    // 一是兼容旧版本字段差异，二是防手改备份文件注入非法值。
+    const nowDate = now;
+    const safeMyCards = [];
+    const myIdMap = new Map(); // 备份 id → 新 id（消费/权益记录外键引用需要）
+    const srcGroupById = new Map(); // 新持卡 id → 备份里的 billGroupId（组归属回填用）
+    let dedupedCards = 0; // merge 模式下「id 已存在」被整体跳过的持卡数（幂等恢复：卡跳过则其记录一并跳过）
+    for (const m of data.myCards) {
+      if (!m || typeof m !== 'object') continue;
+      // 卡种映射：备份的 cardId 在本库不存在（四元组也匹配不上）时跳过该持卡
+      const dstCardId = cardIdMap.get(String(m.cardId || '')) || cardById.get(String(m.cardId || ''));
+      const card = dstCardId ? cardById.get(dstCardId) : null;
+      if (!card) { continue; }
+      // merge 幂等：同 id 持卡已存在 → 视为「库里已有该卡及其数据」，整卡连记录跳过，
+      // 保证同一份备份重复恢复不会产生重复数据
+      if (mode === 'merge' && typeof m.id === 'string' && m.id && existingMyIds.has(m.id)) {
+        dedupedCards++;
+        continue;
+      }
+      const fee = U.clampFeeDate(m.feeMonth, m.feeDay);
+      const repayMode = m.repayMode === 'afterBill' ? 'afterBill' : 'fixed';
+      const newId = (typeof m.id === 'string' && m.id) ? m.id : U.uid();
+      existingMyIds.add(newId);
+      myIdMap.set(String(m.id || newId), newId);
+      srcGroupById.set(newId, String(m.billGroupId || ''));
+      const mc = {
+        id: newId,
+        cardId: card.id,
+        bank: card.bank, name: card.name, org: card.org, level: card.level,
+        annualFee: card.annualFee, waiverType: card.waiverType, waiverCondition: card.waiverCondition, waiverPolicy: card.waiverPolicy,
+        alias: String(m.alias || '').trim(),
+        creditLimit: nonNeg(m.creditLimit, card.startCredit),
+        billingDay: clampDay(m.billingDay, 1),
+        repaymentDay: repayMode === 'fixed' ? Math.min(31, Math.max(1, clampDay(m.repaymentDay, 20))) : clampDay(m.repaymentDay, 20),
+        repayMode,
+        repayValue: m.repayValue != null ? Math.max(0, Math.min(365, Math.round(Number(m.repayValue) || 0))) : clampDay(m.repaymentDay, 20),
+        graceDays: m.graceDays != null ? Math.max(0, Math.min(30, Math.round(Number(m.graceDays) || 0))) : 3,
+        waivedYear: Math.max(0, Math.round(Number(m.waivedYear) || 0)),
+        countPeriodYear: Math.max(0, Math.round(Number(m.countPeriodYear) || 0)),
+        maxInterestDays: Math.max(0, Math.min(120, Math.round(Number(m.maxInterestDays) || 0))),
+        feeMonth: fee.m,
+        feeDay: fee.d,
+        last4: String(m.last4 || '').replace(/\D/g, '').slice(0, 4),
+        monthlySpendTarget: nonNeg(m.monthlySpendTarget, 0),
+        // 权益沿用备份里的稳定 id（消费/权益记录按 bid 归属），缺失时补新 id
+        benefits: normalizeBenefits(Array.isArray(m.benefits) ? m.benefits : [], card.benefits),
+        pointsDeducted: !!m.pointsDeducted,
+        pointsDeductDate: m.pointsDeducted && U.parseDateStr(m.pointsDeductDate) ? String(m.pointsDeductDate) : (m.pointsDeducted ? U.todayStr() : null),
+        assetWaived: !!m.assetWaived,
+        assetWaivedDate: m.assetWaived && U.parseDateStr(m.assetWaivedDate) ? String(m.assetWaivedDate) : (m.assetWaived ? U.todayStr() : null),
+        billGroupId: '',
+        createdAt: U.parseDateStr(String(m.createdAt || '').slice(0, 10)) ? String(m.createdAt) : nowDate.toISOString(),
+      };
+      safeMyCards.push(mc);
+    }
+    if (!safeMyCards.length && !dedupedCards) return err('备份中没有可导入的持卡（卡种匹配全部失败）');
+
+    // —— 合并账单组（备份里的组先重建，成员引用在下面按备份 billGroupId 关联）——
+    const groups = mode === 'merge' ? getBillGroups() : [];
+    const groupIdMap = new Map(); // 备份组 id → 新/现有组
+    const existingGroupNames = new Set(groups.map((g) => g.name));
+    for (const g of Array.isArray(data.billGroups) ? data.billGroups : []) {
+      if (!g || !g.name) continue;
+      const members = (data.myCards || []).filter((m) => m && m.billGroupId === g.id);
+      // 备份组在本库已存在同名组 → 沿用；否则重建（保持名称）
+      const exist = groups.find((x) => x.name === g.name);
+      if (exist) { groupIdMap.set(String(g.id), exist.id); continue; }
+      const newId = (typeof g.id === 'string' && g.id && !groups.some((x) => x.id === g.id)) ? g.id : U.uid();
+      groups.push({ id: newId, name: g.name, createdAt: U.parseDateStr(String(g.createdAt || '').slice(0, 10)) ? String(g.createdAt) : nowDate.toISOString() });
+      existingGroupNames.add(g.name);
+      groupIdMap.set(String(g.id), newId);
+      void members; // 成员数校验在下面按新 myCards 实际归属统一做
+    }
+
+    // —— 组归属回填：组内卡必须同还款节奏，与 UI 创建逻辑一致 ——
+    const groupMembers = new Map();
+    for (const mc of safeMyCards) {
+      const gRaw = srcGroupById.get(mc.id) || '';
+      if (!gRaw || !groupIdMap.has(gRaw)) continue;
+      const gid = groupIdMap.get(gRaw);
+      mc.billGroupId = gid;
+      if (!groupMembers.has(gid)) groupMembers.set(gid, []);
+      groupMembers.get(gid).push(mc);
+    }
+    // 组内两两校验还款节奏；不一致的成员移出组（保留卡，不整组拒绝）
+    const groupErrs = [];
+    for (const [gid, members] of groupMembers) {
+      if (members.length < 2) { for (const m of members) m.billGroupId = ''; continue; }
+      for (let i = 1; i < members.length; i++) {
+        if (!sameRepaySchedule(members[0], members[i], now)) {
+          groupErrs.push('「' + (members[i].alias || members[i].name) + '」与「' + (members[0].alias || members[0].name) + '」还款日不一致，已移出账单组');
+          members[i].billGroupId = '';
+        }
+      }
+    }
+    // 清理空组：校验后成员不足 2 的组解散
+    const aliveGroups = new Set(safeMyCards.map((m) => m.billGroupId).filter(Boolean));
+    const keptGroups = groups.filter((g) => aliveGroups.has(g.id));
+    // merge 模式下已有组不在本次校验范围，原样保留
+    const finalGroups = mode === 'merge'
+      ? groups.filter((g) => aliveGroups.has(g.id) || getMyCards().some((m) => m.billGroupId === g.id))
+      : keptGroups;
+
+    // —— 消费记录（merge 幂等：id 已存在的记录跳过）——
+    const safeCons = [];
+    for (const r of Array.isArray(data.consumptions) ? data.consumptions : []) {
+      if (!r || typeof r !== 'object') continue;
+      if (mode === 'merge' && typeof r.id === 'string' && r.id && existingConsIds.has(r.id)) continue;
+      const newMyId = myIdMap.get(String(r.myCardId || ''));
+      if (!newMyId) continue;
+      const newId = (typeof r.id === 'string' && r.id) ? r.id : U.uid();
+      existingConsIds.add(newId);
+      const amount = Number(r.amount);
+      safeCons.push({
+        id: newId,
+        myCardId: newMyId,
+        type: r.type === 'count' ? 'count' : 'amount',
+        date: U.parseDateStr(r.date) ? String(r.date) : U.todayStr(),
+        amount: isFinite(amount) ? Math.max(0, Math.min(MAX_MONEY, Math.round(amount * 100) / 100)) : 0,
+        count: validCount(r.count) || 0,
+        channel: CHANNELS.includes(r.channel) ? r.channel : CHANNELS[0],
+        category: CATEGORIES.includes(r.category) ? r.category : '其他',
+        note: String(r.note || '').trim(),
+        createdAt: U.parseDateStr(String(r.createdAt || '').slice(0, 10)) ? String(r.createdAt) : nowDate.toISOString(),
+      });
+    }
+
+    // —— 权益使用记录（merge 幂等：id 已存在的记录跳过）——
+    const safeBens = [];
+    for (const r of Array.isArray(data.benefitRecords) ? data.benefitRecords : []) {
+      if (!r || typeof r !== 'object') continue;
+      if (mode === 'merge' && typeof r.id === 'string' && r.id && existingBenIds.has(r.id)) continue;
+      const newMyId = myIdMap.get(String(r.myCardId || ''));
+      if (!newMyId) continue;
+      const mc = safeMyCards.find((x) => x.id === newMyId);
+      // bid 必须能在该卡的权益列表里找到，否则记录无处归属（UI 上永远查不到）
+      const bidOk = r.bid && mc && (mc.benefits || []).some((x) => x.id === r.bid);
+      if (!bidOk) continue;
+      const newId = (typeof r.id === 'string' && r.id) ? r.id : U.uid();
+      existingBenIds.add(newId);
+      safeBens.push({
+        id: newId,
+        myCardId: newMyId,
+        idx: Math.max(0, Math.round(Number(r.idx) || 0)),
+        bid: String(r.bid),
+        type: r.type === 'count' ? 'count' : 'usage',
+        date: U.parseDateStr(r.date) ? String(r.date) : U.todayStr(),
+        count: validCount(r.count) || 0,
+        note: String(r.note || '').trim(),
+        createdAt: U.parseDateStr(String(r.createdAt || '').slice(0, 10)) ? String(r.createdAt) : nowDate.toISOString(),
+      });
+    }
+
+    // —— 账单 ——
+    const existingBillKeys = mode === 'merge'
+      ? new Set(getBills().map((x) => x.myCardId + '|' + x.month))
+      : new Set();
+    const safeBills = [];
+    for (const r of Array.isArray(data.bills) ? data.bills : []) {
+      if (!r || typeof r !== 'object') continue;
+      const newMyId = myIdMap.get(String(r.myCardId || ''));
+      if (!newMyId) continue;
+      if (!/^\d{4}-\d{2}$/.test(String(r.month || ''))) continue;
+      const key = newMyId + '|' + r.month;
+      if (existingBillKeys.has(key)) continue; // 该卡该月账单已存在，跳过
+      existingBillKeys.add(key);
+      const amount = Number(r.amount);
+      safeBills.push({
+        id: (typeof r.id === 'string' && r.id && !safeBills.some((x) => x.id === r.id)) ? r.id : U.uid(),
+        myCardId: newMyId,
+        month: String(r.month),
+        amount: isFinite(amount) ? Math.max(0, Math.min(MAX_MONEY, Math.round(amount * 100) / 100)) : 0,
+        dueDate: U.parseDateStr(r.dueDate) ? String(r.dueDate) : '',
+        paid: r.paid === '已还' ? '已还' : '未还',
+        paidDate: U.parseDateStr(r.paidDate) ? String(r.paidDate) : '',
+        note: String(r.note || '').trim(),
+        createdAt: U.parseDateStr(String(r.createdAt || '').slice(0, 10)) ? String(r.createdAt) : nowDate.toISOString(),
+      });
+    }
+
+    // —— 落库 ——
+    if (mode === 'replace') {
+      store.write('mycards', safeMyCards);
+      store.write('consumptions', safeCons);
+      store.write('benefits', safeBens);
+      store.write('bills', safeBills);
+      store.write('billGroups', finalGroups);
+    } else {
+      const myCards = getMyCards();
+      // merge 模式再防一手 id 撞车（前面 existingMyIds 已排除，这里双保险重建数组）
+      const have = new Set(myCards.map((m) => m.id));
+      for (const mc of safeMyCards) if (!have.has(mc.id)) myCards.push(mc);
+      store.write('mycards', myCards);
+      const cons = getConsumptions().concat(safeCons);
+      store.write('consumptions', cons);
+      const bens = getBenefits().concat(safeBens);
+      store.write('benefits', bens);
+      const bills = getBills().concat(safeBills);
+      store.write('bills', bills);
+      store.write('billGroups', finalGroups);
+    }
+    store.write('cards', cards);
+    cleanBillGroups();
+
+    return json({
+      ok: true,
+      mode,
+      importedCards: safeMyCards.length,
+      skippedCards: (Array.isArray(data.myCards) ? data.myCards.length : 0) - safeMyCards.length,
+      dedupedCards,
+      cardTypesAdded,
+      consumptions: safeCons.length,
+      benefitRecords: safeBens.length,
+      bills: safeBills.length,
+      billGroups: finalGroups.length,
+      groupWarnings: groupErrs,
+    }, 200);
+  }
   if (pathname === '/api/mycards' && method === 'GET') {
     const idx = buildIndexes();
     const data = getMyCards().map((m) => computeMyCard(m, now, idx));
@@ -1129,6 +1415,8 @@ function clampDay(v, dflt) {
 // 非负金额（额度/目标/年费）：空值/负值回退默认，封顶 1 万亿防脏数据
 const MAX_MONEY = 1e12;
 const MAX_COUNT = 1e6;
+// 单次备份导入的持卡数上限：防手改的超大文件拖垮同步写（正常个人规模远低于此）
+const MAX_IMPORT_CARDS = 500;
 function nonNeg(v, dflt) {
   if (v == null || String(v).trim() === '') return dflt || 0;
   const n = U.parseAmount(v);

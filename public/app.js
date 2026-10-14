@@ -245,6 +245,8 @@ function renderMyCards() {
     '<button class="btn primary" id="btn-add-card">＋ 添加持卡</button>' +
     '<button class="btn" id="btn-billgroups">合并账单</button>' +
     '<button class="btn" id="btn-export">导出持卡</button>' +
+    '<button class="btn" id="btn-backup-export">备份</button>' +
+    '<button class="btn" id="btn-backup-import">恢复</button>' +
     '<select id="filter-select" class="filter-select">' +
     option('all', '全部卡片', true) + option('repay', '本月需还款', true) + option('fee', '年费临近(30天)', true) +
     option('met', '年费已达标', true) + option('unpaid', '有未还账单', true) + option('benefit', '有剩余权益', true) +
@@ -462,6 +464,10 @@ function bindPageEvents() {
   if (addBtn) addBtn.addEventListener('click', openAddCardModal);
   const expBtn = $('#btn-export', app);
   if (expBtn) expBtn.addEventListener('click', exportCards);
+  const backupExpBtn = $('#btn-backup-export', app);
+  if (backupExpBtn) backupExpBtn.addEventListener('click', exportBackup);
+  const backupImpBtn = $('#btn-backup-import', app);
+  if (backupImpBtn) backupImpBtn.addEventListener('click', openBackupImportModal);
   const bgBtn = $('#btn-billgroups', app);
   if (bgBtn) bgBtn.addEventListener('click', openBillGroupsModal);
 
@@ -568,6 +574,78 @@ async function exportCards() {
   } catch (e) {
     toast('导出失败：' + e.message, 'error');
   }
+}
+
+// ---------- 持卡备份：导出（全量 JSON，含权益/消费/账单） ----------
+async function exportBackup() {
+  if (!state.myCards.length) return toast('还没有持卡可备份', 'error');
+  try {
+    const res = await fetch('/api/mycards/export');
+    if (!res.ok) {
+      const ct = res.headers.get('content-type') || '';
+      const msg = ct.includes('json') ? (await res.json()).error : ('备份导出失败 ' + res.status);
+      if (res.status === 401 || res.status === 403) showLogin(msg);
+      return toast(msg, 'error');
+    }
+    const blob = await res.blob();
+    // 文件名优先取服务端 Content-Disposition（带日期），取不到就用固定名
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (m && m[1]) || 'guanka-backup.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('备份已下载（含持卡、权益、消费、账单）');
+  } catch (e) {
+    toast('备份导出失败：' + e.message, 'error');
+  }
+}
+
+// ---------- 持卡备份：恢复（JSON 导入，merge / replace 两种模式） ----------
+function openBackupImportModal() {
+  openModal('<div class="modal-title">从备份恢复持卡</div>',
+    '<div style="font-size:12px;color:var(--text-2);margin-bottom:10px">支持本应用导出的备份 JSON 文件（guanka-backup-*.json）。' +
+    '<br>恢复时会自动匹配卡种库（银行+名称+卡组织+卡等级），匹配不上的卡种会自动创建。</div>' +
+    '<div class="field" style="margin-bottom:10px"><label>选择备份文件</label><input type="file" id="backup-file" accept=".json,application/json"></div>' +
+    '<div class="field" style="margin-bottom:10px"><label>恢复方式</label>' +
+    '<select id="backup-mode" style="width:100%">' +
+    '<option value="merge">合并（推荐）— 保留现有数据，追加备份中的卡与记录</option>' +
+    '<option value="replace">覆盖 — 清空现有持卡数据，完全以备份为准</option>' +
+    '</select></div>' +
+    '<div id="backup-warn" style="display:none;font-size:12px;color:#c0392b;margin-bottom:8px">⚠️ 覆盖模式会先清空现有持卡、消费、权益与账单数据，且不可撤销，请确认已有备份文件。</div>' +
+    '<div id="backup-result" style="margin-top:10px"></div>',
+    '<button class="btn" data-close>取消</button><button class="btn primary" id="btn-do-backup-import">开始恢复</button>');
+  $('#backup-mode').addEventListener('change', (e) => {
+    $('#backup-warn').style.display = e.target.value === 'replace' ? 'block' : 'none';
+  });
+  $('#btn-do-backup-import').addEventListener('click', async () => {
+    const btn = $('#btn-do-backup-import');
+    if (btn.disabled) return;
+    const file = $('#backup-file').files[0];
+    if (!file) return toast('请选择备份 JSON 文件', 'error');
+    const mode = $('#backup-mode').value;
+    if (mode === 'replace' && !confirm('确定覆盖？现有持卡数据将被清空，以备份文件为准。')) return;
+    btn.disabled = true;
+    try {
+      const data = JSON.parse(await file.text());
+      const r = await api('/api/mycards/import', { method: 'POST', body: { data, mode } });
+      const badges =
+        '<div class="badge badge-green">恢复 ' + r.importedCards + ' 张持卡</div> ' +
+        (r.skippedCards > 0 ? '<div class="badge badge-yellow" style="margin-left:6px">跳过 ' + r.skippedCards + ' 张（卡种匹配失败）</div>' : '') +
+        (r.cardTypesAdded > 0 ? '<div class="badge badge-green" style="margin-left:6px">新建卡种 ' + r.cardTypesAdded + ' 个</div>' : '') +
+        '<div class="badge" style="margin-left:6px">消费 ' + r.consumptions + ' 条 · 权益 ' + r.benefitRecords + ' 条 · 账单 ' + r.bills + ' 条</div>';
+      $('#backup-result').innerHTML = badges +
+        (r.groupWarnings && r.groupWarnings.length
+          ? '<div style="font-size:12px;color:#b8860b;margin-top:6px">' + r.groupWarnings.map(esc).join('<br>') + '</div>' : '');
+      toast('恢复完成');
+      await loadAll();
+    } catch (e) { toast(e.message, 'error'); }
+    btn.disabled = false;
+  });
 }
 
 function showFeeExpiring() {

@@ -59,6 +59,7 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 | 权益使用 | 每权益显示重置周期徽章（蓝=自然月/紫=自然年/橙=年费日）与已用/总数进度；可逐笔记录、按次数补录、查各周期历史；次数用完自动拦截 |
 | 卡种数据库 | 列表/新增/编辑/删除；批量导入 CSV；按银行分组收起展开（默认收起） |
 | 导出持卡 | 导出当前持卡对应的卡种信息 CSV（仅 12 项基础信息，不含个人隐私数据） |
+| 备份 / 恢复 | 一键导出**全量个人数据 JSON**（持卡 + 权益 + 消费 + 账单 + 账单组，含卡种自动建库）；恢复支持**合并**（幂等，同 id 自动跳过，适合定期备份回灌）与**覆盖**（清空后以备份为准，适合迁移）两种模式，越界/非法字段自动钳制归一 |
 | 主题 | 白色/深色一键切换，选择自动记忆 |
 | 合并账单 | 把还款日相同的多张卡加入同一「账单组」，还款/账单提醒合并为 **1 条**（列出组内各卡与合计应还），不再逐卡刷屏；年费与月刷卡任务仍按卡独立 |
 | 其他 | 卡种库升级自动合并新卡（按 银行+名称+卡组织+等级 去重）；数据原子写入防损坏 |
@@ -71,6 +72,9 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
   `notify.json`（提醒配置，仅在配置过时生成）、`settings.json`（主题/排序/折叠状态）。
 - 备份：`docker run --rm -v guanka-data:/data -v %cd%:/backup alpine tar czf /backup/guanka-backup.tar.gz -C /data .`
   （PowerShell 中 `%cd%` 换成 `$(pwd)` 或绝对路径）
+- **应用内备份（推荐）**：持卡页「备份」按钮下载 `guanka-backup-日期.json`，含持卡/权益/消费/账单/账单组与被引用卡种；
+  「恢复」按钮选择该 JSON 即可合并或覆盖导入，卡种按 银行+名称+卡组织+等级 自动匹配、缺失自动创建。
+  另有 API：`GET /api/mycards/export`（下载）、`POST /api/mycards/import`（body: `{ data, mode: "merge"|"replace" }`）。
 - 恢复：把备份解压到卷对应目录即可；或直接把宿主机目录挂载为卷：
   `docker run -v /your/data/dir:/app/data ...`（容器内以 node 用户运行，注意宿主机目录的读写权限）
 
@@ -271,6 +275,8 @@ NODE_PATH=<jsdom所在node_modules> node tools/ui-test.js
 | POST | /api/cards/import | CSV 批量导入 |
 | GET | /api/cards/export | 导出持卡对应卡种 CSV |
 | GET/POST | /api/mycards | 持卡查询（响应含 data + stats + banks 合并统计）/新增 |
+| GET | /api/mycards/export | 持卡备份下载（全量 JSON，含权益/消费/账单/账单组与被引用卡种） |
+| POST | /api/mycards/import | 持卡备份恢复（body: `{ data, mode: "merge"|"replace" }`，merge 幂等） |
 | PUT/DELETE | /api/mycards/:id | 持卡编辑/删除 |
 | POST | /api/mycards/:id/consumptions | 记一笔消费 |
 | POST | /api/mycards/:id/consumptions/count | 补录消费笔数 |
