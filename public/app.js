@@ -631,6 +631,11 @@ function openBackupImportModal() {
     if (mode === 'replace' && !confirm('确定覆盖？现有持卡、消费、权益与账单数据将被清空，以备份文件为准，不可撤销。\n\n建议先点「备份」导出当前数据再操作。')) return;
     btn.disabled = true;
     try {
+      // 前置大小检查：后端 body 上限 20MB（上限内 JSON 结构开销略超原始数据），
+      // 超限文件直接拒绝，避免浏览器先全量读入+parse 数十 MB 导致页面卡死
+      if (file.size > 22 * 1024 * 1024) {
+        throw new Error('备份文件 ' + (file.size / 1024 / 1024).toFixed(1) + 'MB 超过 22MB 上限，请拆分后导入');
+      }
       const data = JSON.parse(await file.text());
       const r = await api('/api/mycards/import', { method: 'POST', body: { data, mode } });
       const badges =

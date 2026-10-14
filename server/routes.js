@@ -634,7 +634,14 @@ async function handle(method, pathname, url, body, req) {
       bills: getBills().filter((b) => myIds.has(b.myCardId)),
     };
     const filename = 'guanka-backup-' + U.todayStr() + '.json';
-    return json(payload, 200, { 'Content-Disposition': 'attachment; filename="' + filename + '"' });
+    // no-store：备份含个人金融数据，禁止被浏览器/代理/CDN 缓存。
+    // body 传预序列化字符串：send() 对字符串直接透传，避免大对象被二次 stringify
+    const payloadJson = JSON.stringify(payload);
+    return json(payloadJson, 200, {
+      'Content-Type': 'application/json; charset=utf-8', // send() 对字符串默认 text/plain，需显式覆盖
+      'Content-Disposition': 'attachment; filename="' + filename + '"',
+      'Cache-Control': 'no-store',
+    });
   }
   // 持卡备份导入：两种模式——
   //  merge（默认）：按 id 去重追加新记录，已存在的持卡/记录原样保留（适合备份恢复进现有实例）；
@@ -646,6 +653,12 @@ async function handle(method, pathname, url, body, req) {
     if (data.schema !== 'guanka-backup') return err('不是有效的管卡备份文件（缺少 schema 标识）');
     if (!Array.isArray(data.myCards)) return err('备份文件缺少 myCards 数据');
     if (data.myCards.length > MAX_IMPORT_CARDS) return err('备份包含 ' + data.myCards.length + ' 张持卡，超出单次导入上限 ' + MAX_IMPORT_CARDS);
+    // 明细记录（消费/权益/账单/卡种/组）总条数上限：防止单类缺省时在其余字段塞海量数据
+    for (const k of ['cardTypes', 'consumptions', 'benefitRecords', 'billGroups', 'bills']) {
+      if (Array.isArray(data[k]) && data[k].length > MAX_IMPORT_RECORDS) {
+        return err('备份 ' + k + ' 含 ' + data[k].length + ' 条记录，超出单次导入上限 ' + MAX_IMPORT_RECORDS);
+      }
+    }
 
     const mode = b.mode === 'replace' ? 'replace' : 'merge';
     const cards = getCards();
@@ -686,6 +699,7 @@ async function handle(method, pathname, url, body, req) {
     const myIdMap = new Map(); // 备份 id → 新 id（消费/权益记录外键引用需要）
     const srcGroupById = new Map(); // 新持卡 id → 备份里的 billGroupId（组归属回填用）
     let dedupedCards = 0; // merge 模式下「id 已存在」被整体跳过的持卡数（幂等恢复：卡跳过则其记录一并跳过）
+    let skippedNoId = 0;  // 非对象/无有效 id 且卡种匹配失败的持卡数（与 dedupedCards 区分口径）
     for (const m of data.myCards) {
       if (!m || typeof m !== 'object') continue;
       // 卡种映射：优先四元组匹配（导出→导入的正规路径）；备份 cardId 直接命中本库
@@ -695,7 +709,7 @@ async function handle(method, pathname, url, body, req) {
       const srcId = String(m.cardId || '');
       const dstCardId = cardIdMap.get(srcId) || cardById.get(srcId);
       const card = dstCardId ? cardById.get(dstCardId) : null;
-      if (!card) { continue; }
+      if (!card) { skippedNoId++; continue; }
       // merge 幂等：同 id 持卡已存在 → 视为「库里已有该卡及其数据」，整卡连记录跳过，
       // 保证同一份备份重复恢复不会产生重复数据
       if (mode === 'merge' && typeof m.id === 'string' && m.id && existingMyIds.has(m.id)) {
@@ -904,7 +918,10 @@ async function handle(method, pathname, url, body, req) {
       ok: true,
       mode,
       importedCards: safeMyCards.length,
-      skippedCards: (Array.isArray(data.myCards) ? data.myCards.length : 0) - safeMyCards.length,
+      // skippedCards = 既没导入也没幂等跳过的部分（卡种匹配失败/垃圾行），
+      // 不含 dedupedCards——否则重复导入时前端会把「已存在跳过」误标为「卡种匹配失败」
+      skippedCards: (Array.isArray(data.myCards) ? data.myCards.length : 0)
+        - safeMyCards.length - dedupedCards - skippedNoId,
       dedupedCards,
       cardTypesAdded,
       consumptions: safeCons.length,
@@ -1434,6 +1451,9 @@ const MAX_MONEY = 1e12;
 const MAX_COUNT = 1e6;
 // 单次备份导入的持卡数上限：防手改的超大文件拖垮同步写（正常个人规模远低于此）
 const MAX_IMPORT_CARDS = 500;
+// 消费/权益/账单等明细记录的导入上限：与 20MB 请求体上限共同兜底，
+// 防止在 body 上限内塞入海量空对象，让归一循环+全量重写退化成分钟级阻塞
+const MAX_IMPORT_RECORDS = 20000;
 function nonNeg(v, dflt) {
   if (v == null || String(v).trim() === '') return dflt || 0;
   const n = U.parseAmount(v);
