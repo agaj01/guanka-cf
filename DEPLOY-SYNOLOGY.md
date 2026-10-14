@@ -1,10 +1,10 @@
-# 在群晖（Synology）NAS 上部署「管卡」
+# 在群晖（Synology）NAS 上部署「管卡」— 局域网访问版
 
-本文档面向 Synology DSM 7.2+。项目自带 `Dockerfile`，**镜像在 NAS 上本地构建**（无需 Docker Hub、
-无需联网拉取业务镜像，仅首次构建需联网下载 `node:20-alpine` 基础镜像）。
+本文档面向 Synology DSM 7.2+，目标：**在群晖上跑起来，并让家里局域网的手机/电脑都能访问**。
+项目自带 `Dockerfile`，**镜像在 NAS 上本地构建**（无需 Docker Hub 业务镜像，仅首次构建需联网拉取 `node:20-alpine` 基础镜像）。
 
-> 说明：本项目已放弃 Docker Hub 镜像发布方案，`docker-compose.yml` 用的是 `build: .`，
-> 因此部署时必须把**完整源码**放到 NAS 上，不能只拿一个 compose 文件。
+> 说明：`docker-compose.yml` 用的是 `build: .`，部署时必须把**完整源码**放到 NAS 上，
+> 不能只拿一个 compose 文件。项目零 npm 依赖，构建很快。
 
 ---
 
@@ -15,9 +15,9 @@
 | 服务名 / 容器名 | `guanka` / `credit-card-manager` | compose 中已固定 |
 | 访问端口 | `3000` | 群晖自身占用 5000/5001/80/443，3000 通常空闲 |
 | 数据位置 | Docker 命名卷 `guanka-data` → 容器内 `/app/data` | **不要**随意删除该卷 |
-| 命名卷落盘位置 | `/volume1/@docker/volumes/guanka-data/_data/` | 群晖版本不同路径可能略有差异，用 `sudo docker volume inspect guanka-data` 查 `Mountpoint` 字段最准 |
+| 命名卷落盘位置 | `/volume1/@docker/volumes/guanka-data/_data/` | 用 `sudo docker volume inspect guanka-data` 查 `Mountpoint` 最准 |
 | 建议源码目录 | `/volume1/docker/credit-card-manager` | 群晖 Docker 的标准存放位置 |
-| 运行用户 | `node`（uid 1000，非 root） | **绑定目录挂载时必须给 1000 权限**，见 §5 |
+| 运行用户 | `node`（uid 1000，非 root） | 绑定目录挂载时必须给 1000 权限，见 §5 |
 | 首次启动 | 自动写入 83 张卡种库示例数据 | 无需任何人工配置 |
 | 重启策略 | `unless-stopped` | NAS 重启后容器自动拉起 |
 
@@ -43,17 +43,16 @@ credit-card-manager/
 
 1. 打开 **套件中心** → 搜索 `Container Manager` → 安装（DSM 7.2 及以上）
 2. DSM 7.0 / 7.1 对应的是旧版 `Docker` 套件，界面略有差异但步骤一致
-3. 安装完成后，主菜单里会出现 **Container Manager**
 
 ### 1.2 创建源码目录（关键避坑点）
 
-> ⚠️ **群晖的 Docker 不会自动创建宿主目录**。如果 compose 里引用了不存在的路径，
-> 启动会直接报 `Bind mount failed` / `no such file or directory`。所以目录必须先手工建好。
+> ⚠️ **群晖的 Docker 不会自动创建宿主目录**。如果 compose 引用了不存在的路径，
+> 启动会直接报 `Bind mount failed` / `no such file or directory`。目录必须先手工建好。
 
 用 **File Station** 操作：
 
 1. 打开 File Station → 进入 `docker` 共享文件夹
-   （若没有 `docker` 共享文件夹：控制面板 → 共享文件夹 → 新增 → 名称填 `docker`）
+   （若没有：控制面板 → 共享文件夹 → 新增 → 名称填 `docker`）
 2. 在 `docker` 下新建文件夹 `credit-card-manager`
 3. 最终路径为：`/volume1/docker/credit-card-manager`
 
@@ -63,7 +62,7 @@ credit-card-manager/
 sudo mkdir -p /volume1/docker/credit-card-manager
 ```
 
-### 1.3 （可选）开启 SSH
+### 1.3 开启 SSH（推荐，后面多条命令要用）
 
 控制面板 → **终端机和 SNMP** → 勾选「启动 SSH 功能」→ 端口默认 22 → 应用。
 
@@ -80,31 +79,41 @@ ssh 你的群晖用户名@群晖IP
 
 ### 方式 A：File Station 上传（纯图形界面）
 
-1. 在本地把项目打包成 zip（不含 `data/`、`.git/`、`node_modules/`）
+1. 在本地把项目打包成 zip（**不含** `data/`、`.git/`、`node_modules/`）
 2. File Station → 进入 `/volume1/docker/credit-card-manager`
 3. 点「上传」→「上传 - 覆盖」，把 zip 传上去
-4. 右键 zip → **解压缩到 credit-card-manager**
-5. 确认目录结构：`/volume1/docker/credit-card-manager/Dockerfile`、`docker-compose.yml`、
-   `server/`、`public/` 都在**这一层**（不要多套一层 `credit-card-manager/credit-card-manager/`）
+4. 右键 zip → **解压缩到当前文件夹**
+5. 确认目录结构：`Dockerfile`、`docker-compose.yml`、`server/`、`public/` 都在**这一层**
+   （不要多套一层 `credit-card-manager/credit-card-manager/`）
 
 > 这一步是最常见的翻车点：解压后多了一层同名目录，导致 `build: .` 找不到 `Dockerfile`。
 
-### 方式 B：SSH 上传（推荐，快且不易出错）
+### 方式 B：git 拉取（推荐，一步到位且版本最新）
 
 ```bash
-# 在本地电脑执行（Windows 用 Git Bash / PowerShell 的 scp）
-scp credit-card-manager-docker.zip 群晖用户名@群晖IP:/volume1/docker/credit-card-manager/
-
-# 登录 NAS 后解压
 ssh 群晖用户名@群晖IP
-cd /volume1/docker/credit-card-manager
-sudo unzip -o credit-card-manager-docker.zip
-ls -la          # 确认 Dockerfile / docker-compose.yml 就在当前层
+cd /volume1/docker
+sudo git clone https://github.com/folkson/credit-card-manager-docker.git credit-card-manager
+ls /volume1/docker/credit-card-manager   # 确认 Dockerfile、docker-compose.yml 就在这一层
 ```
+
+> 仓库若为 private，先在 NAS 上配好凭据或改用方式 A。
 
 ---
 
 ## 3. 方式一：GUI「项目」部署（推荐新手）
+
+### 3.1 生成访问令牌（局域网访问必做）
+
+局域网访问必须设置 `AUTH_TOKEN`，否则应用只接受群晖本机访问（其它设备 403）。
+SSH 到 NAS 生成一个随机口令：
+
+```bash
+head -c 32 /dev/urandom | base64
+# 输出形如：Xk9mP2qR7vLw3sY8nB4cD1eF5gH6iJ0k（复制保存好，这就是你的访问令牌）
+```
+
+### 3.2 创建项目
 
 1. 打开 **Container Manager** → 左侧 **项目** → 点 **新增**
 2. 填写：
@@ -115,7 +124,7 @@ ls -la          # 确认 Dockerfile / docker-compose.yml 就在当前层
    | 路径 | 选择 `/volume1/docker/credit-card-manager` |
    | 来源 | 选 **创建 docker-compose.yml** |
 
-3. 在编辑框里粘贴（内容与项目自带 `docker-compose.yml` 一致）：
+3. 在编辑框里粘贴（**局域网访问版**）：
 
    ```yaml
    services:
@@ -124,10 +133,9 @@ ls -la          # 确认 Dockerfile / docker-compose.yml 就在当前层
        image: credit-card-manager:1.0.0
        container_name: credit-card-manager
        ports:
-         - "127.0.0.1:3000:3000"
+         - "3000:3000"          # 局域网访问：绑所有网卡；想仅本机用改回 "127.0.0.1:3000:3000"
        environment:
-         # 强烈建议设置：留空则仅允许本机(回环)访问，局域网其它设备会被拒绝
-         AUTH_TOKEN: ${AUTH_TOKEN:-}
+         AUTH_TOKEN: ${AUTH_TOKEN:-}   # 必设，见 §3.1；留空则局域网一律 403
          TRUST_HTTPS: ${TRUST_HTTPS:-0}
        volumes:
          - guanka-data:/app/data
@@ -137,52 +145,81 @@ ls -la          # 确认 Dockerfile / docker-compose.yml 就在当前层
      guanka-data:
    ```
 
-   > **关于端口与 AUTH_TOKEN**：
-   > - 上面的 `127.0.0.1:3000:3000` 表示只在群晖本机暴露端口。若你要从局域网其它设备
-   >   （手机/电脑）访问，需改成 `"3000:3000"`，**并务必同时设置 `AUTH_TOKEN`**；
-   >   否则未设令牌时服务默认只接受回环访问，局域网请求会返回 403。
-   > - 设置令牌的方式：在源码目录建 `.env` 文件写入 `AUTH_TOKEN=你的随机长口令`，
-   >   compose 会自动读取；或在「项目」编辑界面的 **环境** 标签页里手动添加变量。
-   > - 令牌只在服务端保存，浏览器侧仅持有一个 HttpOnly 会话 Cookie，前端不存明文。
+4. 点 **下一步** → 在 **环境** 标签页（或「环境变量」设置处）添加变量：
 
-4. 点 **验证**（群晖会检查 YAML 语法）→ 通过后点 **下一步**
+   | 变量名 | 值 |
+   |--------|-----|
+   | `AUTH_TOKEN` | §3.1 生成的口令 |
+
+   > 也可以改用 `.env` 文件：在 `/volume1/docker/credit-card-manager/` 下新建 `.env`，
+   > 内容一行：`AUTH_TOKEN=刚才生成的口令`。compose 会自动读取。两种方式二选一。
+
 5. 勾选 **创建项目后立即启动** → 点 **完成**
-6. 首屏会显示构建进度（拉取 `node:20-alpine` + 构建镜像），**约 1～3 分钟**，首次较慢属正常
+6. 首屏显示构建进度（拉取 `node:20-alpine` + 构建镜像），**约 1～3 分钟**属正常
 7. 项目状态变为 **运行中** 即完成
 
-> 若点「验证」后报 `Bind mount failed`：回到 §1.2，检查路径是否真实存在、是否拼错。
+> 若报 `Bind mount failed`：回到 §1.2 检查路径是否真实存在、是否拼错。
 
----
-
-## 4. 方式二：SSH 命令行部署
+### 3.3 用命令行方式部署（等价，二选一）
 
 ```bash
-# 1. 进入源码目录
 cd /volume1/docker/credit-card-manager
 
-# 2. 构建并后台启动
+# 1) 写 .env（把输出粘贴进去）
+echo "AUTH_TOKEN=$(head -c 32 /dev/urandom | base64)" | sudo tee .env > /dev/null
+
+# 2) 构建并后台启动
 sudo docker compose up -d
 
-# 3. 看构建/启动日志
+# 3) 看日志（Ctrl+C 退出，不影响服务）
 sudo docker compose logs -f
 
-# 4. 确认容器在跑
+# 4) 确认容器在跑
 sudo docker ps --filter name=credit-card-manager
 ```
 
-预期输出中 `STATUS` 应为 `Up ... (healthy)`——镜像内置了 `HEALTHCHECK`，
-启动约 30 秒后会从 `Up` 变成 `Up (healthy)`。
+预期 `STATUS` 为 `Up ... (healthy)`——镜像内置了 `HEALTHCHECK`，启动约 30 秒后从 `Up` 变为 `Up (healthy)`。
 
 常用命令（均需 `sudo`）：
 
 ```bash
-sudo docker compose ps          # 状态
-sudo docker compose restart     # 重启
+sudo docker compose ps                # 状态
+sudo docker compose restart           # 重启
 sudo docker compose logs --tail=100   # 最近 100 行日志
-sudo docker compose down        # 停止（数据保留在卷里）
-sudo docker compose down -v     # 停止并删卷（慎用！数据全没）
-sudo docker compose up -d --build    # 更新代码后重新构建
+sudo docker compose down              # 停止（数据保留在卷里）
+sudo docker compose down -v           # 停止并删卷（慎用！数据全没）
+sudo docker compose up -d --build     # 更新代码后重新构建
 ```
+
+---
+
+## 4. 局域网访问验证
+
+1. 在**局域网内另一台设备**（手机/电脑，别用 NAS 本机）打开：
+   **`http://群晖IP:3000`**（群晖 IP 可在 控制面板 → 信息中心 查看，如 `192.168.1.10`）
+2. 首次访问弹出令牌输入框 → 输入 `AUTH_TOKEN` → 进入首页
+3. 首页出现 4 个统计卡、卡种库有 83 张卡 → 部署成功，局域网访问打通
+4. 命令行自检（任意局域网设备）：
+
+   ```bash
+   curl http://群晖IP:3000/api/health
+   # 期望：{"ok":true,"version":"1.0.0",...}
+   ```
+
+**排查清单（局域网打不开时按序检查）**
+
+| 现象 | 原因 / 处理 |
+|------|------------|
+| 手机访问 403 | 没设 `AUTH_TOKEN` 或没生效：确认 §3.2 第 4 步变量已填，然后 `sudo docker compose up -d` 重建容器 |
+| 令牌输错想重来 | 清浏览器 Cookie 或换无痕窗口重进 |
+| 打不开，连接被拒 | 容器未运行：`sudo docker compose ps`；看 `logs` |
+| 状态一直 `starting` | 等 30 秒；仍不变则看日志有无端口占用/崩溃 |
+| `EACCES: permission denied` | 用了绑定挂载但没 chown 1000，见 §5 方案二 |
+| `Bind mount failed` | 宿主目录不存在，见 §1.2 |
+| `Dockerfile not found` | 解压多套了一层目录，见 §2 方式 A 末尾提示 |
+| 端口 3000 被占用 | 改 compose 的 `ports` 为 `"8080:3000"`，访问 `http://群晖IP:8080` |
+| 其它设备仍不通 | 群晖防火墙：控制面板 → 安全性 → 防火墙，放行 TCP 3000 |
+| Wi-Fi 访客网络不通 | 手机连到主网络（访客网络常与主网隔离） |
 
 ---
 
@@ -191,10 +228,7 @@ sudo docker compose up -d --build    # 更新代码后重新构建
 ### 方案一（默认，推荐）：命名卷
 
 compose 里 `volumes: - guanka-data:/app/data` 就是命名卷，**无需任何权限配置**，
-容器内 `node` 用户对卷有完整读写权限。
-
-- 落盘位置：`/volume1/@docker/volumes/guanka-data/_data/`
-- 备份、升级都最省心，**建议保持默认**
+容器内 `node` 用户对卷有完整读写权限。备份、升级都最省心，**建议保持默认**。
 
 ### 方案二：绑定到可见目录（想直接用 File Station 看/改 JSON 时）
 
@@ -218,30 +252,55 @@ sudo chmod 755 /volume1/docker/credit-card-manager/data
 
 ---
 
-## 6. 访问与验证
+## 6. 批量导入卡种：CSV 模板与步骤
 
-1. 浏览器打开 **`http://群晖IP:3000`**（局域网内）
-2. 首页出现 4 个统计卡、卡种库有 83 张卡 → 部署成功
-3. 命令行自检：
+系统支持两种批量导入：
 
-   ```bash
-   curl http://群晖IP:3000/api/health
-   # 期望：{"ok":true,...}
-   ```
+| 功能 | 入口 | 格式 | 用途 |
+|------|------|------|------|
+| **卡种库批量导入** | 卡种库页「导入」按钮 | CSV（12 列） | 批量填写卡产品信息（银行/年费/权益等） |
+| **持卡数据备份/恢复** | 我的持卡页「备份」「恢复」按钮 | JSON（系统导出） | 整库备份、跨实例迁移 |
 
-**排查清单**
+你要批量填卡信息，用的是 **CSV 卡种导入**。模板见仓库 `template/cards-template.csv`，
+也可直接复制下面内容（UTF-8 编码，**表头必须一字不差**）：
 
-| 现象 | 原因 / 处理 |
-|------|------------|
-| 打不开，连接被拒 | 容器未运行：`sudo docker compose ps`；看 `logs` |
-| 状态一直 `starting` 不变 healthy | 等 30 秒；仍不变则看日志有无端口占用/崩溃 |
-| `EACCES: permission denied` | 用了绑定挂载但没 chown 1000，见 §5 方案二 |
-| `Bind mount failed` | 宿主目录不存在，见 §1.2 |
-| `Dockerfile not found` / `unable to prepare context` | 解压多套了一层目录，源码没在项目根，见 §2 方式 A 末尾提示 |
-| 端口 3000 被占用 | 改 compose 的 `ports` 为 `"8080:3000"`，访问 `http://群晖IP:8080` |
-| 构建时拉取基础镜像超时 | NAS 无法访问 Docker Hub；见 §9 离线方案三 |
+```csv
+银行,卡片名称,卡等级,卡组织,年费,免年费类型,刷免条件,免年费政策,起批额度,主要权益,申请条件,备注
+招商银行,经典白金信用卡,白金卡,银联+Mastercard,1000,消费刷免,60000,核卡当年刷满6万免次年,,,生日10倍积分,,
+浦发银行,AE白金信用卡,白金卡,美国运通,3600,消费刷免,600000,年刷满60万免次年年费,,,5万起批额度,送龙腾,Example
+中信银行,i黑金信用卡,金卡,银联,480,笔数刷免,6,年刷满6笔免次年年费,,,医院挂号绿色通道,,
+```
 
-群晖防火墙：若在 控制面板 → 安全性 → 防火墙 中启用了规则，需放行 TCP 3000（或你自定义的端口）。
+### 列说明
+
+| 列名 | 必填 | 说明 / 取值 |
+|------|------|------------|
+| 银行 | ✅ | 如 `招商银行`；为空该行报错跳过 |
+| 卡片名称 | ✅ | 如 `经典白金信用卡`；为空报错跳过 |
+| 卡等级 |  | 如 `普卡`/`金卡`/`白金卡`/`黑金卡`/`无限卡`，自由文本 |
+| 卡组织 |  | 如 `银联`/`VISA`/`Mastercard`/`美国运通`/`JCB`/`银联+Mastercard` |
+| 年费 |  | 数字，如 `1000`；空或非法按 `0` 处理 |
+| 免年费类型 |  | 只认这 6 个值：`消费刷免` / `笔数刷免` / `积分抵扣` / `资产存免` / `刚性` / `免年费`；其它值归为 `免年费` |
+| 刷免条件 |  | 数字或文本，如 `60000`（刷满6万）、`6`（6笔） |
+| 免年费政策 |  | 自由文本，如 `核卡当年刷满6万免次年` |
+| 起批额度 |  | 数字，如 `50000` |
+| 主要权益 |  | 多个权益用 `|` 分隔，如 `机场贵宾厅|代驾2次|延误险` |
+| 申请条件 |  | 自由文本 |
+| 备注 |  | 自由文本 |
+
+**去重规则**：系统按「银行 + 卡片名称 + 卡组织 + 卡等级」四元组判重，
+与库中已有卡种或文件内其它行重复的自动跳过（结果页会列出跳过清单），不会产生重复数据。
+
+### 导入步骤
+
+1. 用 Excel / WPS / 腾讯文档按上表填好卡信息
+2. **另存为 CSV（UTF-8）**——Excel 是「CSV UTF-8（逗号分隔）」；普通 CSV 中文可能变乱码
+3. 打开 `http://群晖IP:3000` → **卡种库**页 → 点 **导入** → 选择 CSV 文件（或直接粘贴 CSV 文本）→ 确认
+4. 查看结果提示：`新增 N 张 / 跳过 M 张 / 错误 K 条`；点开可看每行的跳过与错误原因
+5. 想清空重来：先在卡种库页删除不要的卡种（导入是追加式，不会覆盖已有卡种）
+
+> 导入后的卡种只是「卡产品库」。要在首页管理账单日/还款日，还需到
+> **我的持卡**页 → 添加持卡 → 选择对应卡种。持卡的完整备份/恢复用「备份/恢复」按钮（JSON）。
 
 ---
 
@@ -250,7 +309,7 @@ sudo chmod 755 /volume1/docker/credit-card-manager/data
 提醒功能由容器内常驻进程定时检查，**不需要群晖的计划任务 / crontab**。
 
 进入网页 → 顶栏 🔔 → 配置 **WxPusher / Server酱³ / Bark** 任一即可，配置会存进卷里的
-`notify.json`（明文）。若不想明文存盘，改用环境变量——在 compose 的 `guanka:` 下加：
+`notify.json`。若不想明文存盘，改用环境变量——在 compose 的 `guanka:` 下加：
 
 ```yaml
     environment:
@@ -269,44 +328,39 @@ sudo chmod 755 /volume1/docker/credit-card-manager/data
 ### 8.1 备份数据（命名卷）
 
 ```bash
-# 建备份目录
 sudo mkdir -p /volume1/docker/backup
 
-# tar 打包命名卷（需 NAS 能拉到 alpine；不行用下面的直拷法）
-sudo docker run --rm \
-  -v guanka-data:/data \
-  -v /volume1/docker/backup:/backup \
-  alpine tar czf /backup/guanka-$(date +%Y%m%d).tar.gz -C /data .
-```
-
-**更简单、不依赖任何镜像的直拷法**（推荐，命名卷在宿主机上就是普通目录）：
-
-```bash
+# 直拷法（推荐，命名卷在宿主机上就是普通目录，不依赖任何镜像）
 sudo cp -a /volume1/@docker/volumes/guanka-data/_data/. /volume1/docker/backup/guanka-$(date +%Y%m%d)/
 ```
 
-备份出来的就是这些 JSON：`cards.json`（卡种库）、`mycards.json`（持卡）、`consumptions.json`（消费）、
-`benefits.json`（权益）、`bills.json`（账单流水）、`billGroups.json`（合并账单组）、
-`settings.json`（主题/排序），以及配了提醒后的 `notify.json`。
+也可以在网页上直接备份：**我的持卡**页 → **备份** → 下载
+`guanka-backup-日期.json`（含持卡、消费、权益、账单、账单组，不含提醒配置）。
 
 ### 8.2 恢复
 
+两种方式：
+
 ```bash
+# 方式一：文件级恢复（整卷回滚）
 sudo docker compose down
-sudo cp -a /volume1/docker/backup/guanka-20261013/. /volume1/@docker/volumes/guanka-data/_data/
+sudo cp -a /volume1/docker/backup/guanka-20261014/. /volume1/@docker/volumes/guanka-data/_data/
 sudo docker compose up -d
 ```
+
+网页恢复：**我的持卡**页 → **恢复** → 选择备份 JSON → 模式选 `merge`（默认，按 id 去重追加）
+或 `replace`（清空后全量覆盖，慎用）。
 
 ### 8.3 升级代码
 
 ```bash
 cd /volume1/docker/credit-card-manager
-# 覆盖上传新源码（保留 docker-compose.yml 的本地修改）
-sudo docker compose up -d --build     # 重新构建并替换容器
-sudo docker compose logs -f           # 确认正常
+sudo git pull                        # 方式 B 安装的用 git；zip 安装的重新上传覆盖
+sudo docker compose up -d --build    # 重新构建并替换容器
+sudo docker compose logs -f          # 确认正常
 ```
 
-数据在命名卷里，**升级不会丢数据**。卡种库若有新增，启动时会自动合并（按 银行+名称+卡组织+等级 去重）。
+数据在命名卷里，**升级不会丢数据**。卡种库若有新增，启动时自动合并（按四元组去重）。
 
 ---
 
@@ -317,7 +371,6 @@ sudo docker compose logs -f           # 确认正常
 在任意装了 Docker 的电脑上构建并导出：
 
 ```bash
-# 在源码目录（电脑上）
 docker build -t credit-card-manager:1.0.0 .
 docker save credit-card-manager:1.0.0 | gzip > credit-card-manager-1.0.0.tar.gz
 ```
@@ -331,51 +384,35 @@ sudo gunzip -c credit-card-manager-1.0.0.tar.gz | sudo docker load
 此时把 compose 的 `build: .` 一行**删掉**（保留 `image: credit-card-manager:1.0.0`），
 再 `sudo docker compose up -d` 即可（不再需要源码）。
 
-> 注意架构一致：群晖绝大多数机型是 `x86_64`，少数 ARM 机型（如部分 DS223j 等 Realtek/ARM 型号）
-> 是 `arm64`/`armv7`。在 ARM 电脑上构建的镜像不能直接给 x86 NAS 用，反之亦然。
-> 不确定时用 §3/§4 在 NAS 上本地构建，一定不会错。
-
-### 方式四：ARM 机型
-
-`node:20-alpine` 官方支持 `amd64 / arm64 / armv7`，在 NAS 上本地构建会自动选对架构，
-**无需任何额外配置**，直接按 §3 或 §4 走即可。
+> 注意架构一致：群晖绝大多数机型是 `x86_64`，少数 ARM 机型是 `arm64`/`armv7`。
+> 不确定时用 §3 在 NAS 上本地构建，一定不会错。
 
 ---
 
-## 10. 对外访问（可选，注意安全）
+## 10. 安全建议
 
-局域网内直接用 `http://群晖IP:3000` 即可。若要从公网访问：
+最简安全姿势：**仅局域网使用 + 设置 `AUTH_TOKEN`**（本文档默认配置）。
 
-1. **必须设置 `AUTH_TOKEN`**。本应用默认在未配置令牌时只允许**回环（本机）访问**，
-   但从公网经过反向代理访问时，来源 IP 会被识别为非回环，请求会被 403 拒绝。
-   因此对外访问场景下请在 `.env` 里设置一个足够长的随机口令：
-   ```bash
-   AUTH_TOKEN=$(head -c 32 /dev/urandom | base64)
-   ```
-   写入 `docker-compose.yml` 同目录的 `.env`，然后 `sudo docker compose up -d`。
-   浏览器首次访问会弹出令牌输入框，输入即建立 HttpOnly 会话。
-2. 走群晖 **反向代理** + **HTTPS 证书** 时，同时设置 `TRUST_HTTPS=1`，
-   这样会话 Cookie 会带 `Secure` 标记，仅在 HTTPS 下回传。
-3. 推荐做法：不直接映射端口到公网；或只在 SSH 隧道 / Tailscale / WireGuard 内网访问。
-4. 若仍要暴露，请在 控制面板 → 安全性 中开启自动封锁、限制来源 IP，
-   并在反代上再加一层 Basic Auth。
+进一步加固（可选）：
 
-最简安全姿势：**不开外网，仅在家里的局域网用，同时设置 `AUTH_TOKEN`。**
+1. 群晖 控制面板 → 安全性 → 开启**自动封锁**（登录失败多次封 IP）
+2. 若要走反向代理 + HTTPS 对外，设置 `TRUST_HTTPS=1`（会话 Cookie 加 `Secure`）
+3. 不建议把 3000 端口直接映射到公网；外网访问优先用 Tailscale / WireGuard / SSH 隧道
+4. 定期用 §8.1 做数据备份
 
 ---
 
 ## 11. 一键检查清单
 
-部署后逐条打勾：
-
 - [ ] Container Manager 已安装
-- [ ] `/volume1/docker/credit-card-manager` 目录已创建
-- [ ] 源码已上传且 `Dockerfile`、`docker-compose.yml`、`server/`、`public/` 在同一层
+- [ ] `/volume1/docker/credit-card-manager` 目录已创建，源码已就位（Dockerfile/compose/server/public 同层）
+- [ ] 已生成并配置 `AUTH_TOKEN`（§3.1 / §3.2 第 4 步）
+- [ ] compose 的 `ports` 为 `"3000:3000"`（局域网访问版）
 - [ ] 未上传本地 `data/` 目录
-- [ ] 已设置 `AUTH_TOKEN`（局域网/公网访问必填；仅本机用可留空）
 - [ ] 项目已启动，`docker ps` 显示 `Up (healthy)`
-- [ ] `http://群晖IP:3000` 能打开，卡种库有 83 张卡
+- [ ] **局域网另一台设备**打开 `http://群晖IP:3000`，输入令牌能进首页
+- [ ] 卡种库有 83 张卡
+- [ ] CSV 卡种导入测试通过（先用模板里的 4 行示例试一遍）
 - [ ] 数据落盘确认：`/volume1/@docker/volumes/guanka-data/_data/` 下有 JSON 文件
-- [ ] 已做一次备份到 `/volume1/docker/backup/`
+- [ ] 已做一次备份（网页备份或直拷法）
 - [ ] （如用绑定挂载）已 `chown 1000:1000` 数据目录
-- [ ] （如需外网）已加反向代理 + HTTPS + `TRUST_HTTPS=1`
