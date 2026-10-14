@@ -273,6 +273,53 @@ async function main() {
       check('merge 后共 3 张卡（backup4 两张 + 新卡）', wrap.data.length === 3, wrap.data.length);
     }
 
+    // ---- 9. 回归补测：账单 id 撞车 / 0 元消费拦截 / 组解散 ----
+    console.log('--- 9. 修复回归补测 ---');
+    {
+      // 9a. merge 新卡但备份账单 id 与库中已有账单相同 → 不产生重复主键
+      const clash = makeBackup();
+      clash.myCards[0].id = 'mc-clash';
+      clash.bills[0].id = 'bill-1'; // 库中 mc-fresh 的账单已占用 bill-1
+      clash.bills[0].myCardId = 'mc-clash';
+      clash.bills[0].month = '2026-08'; // 避开 (卡,月) 去重，专测 id 撞车
+      const r = await req('POST', '/api/mycards/import', { data: clash, mode: 'merge' });
+      check('账单 id 撞车时 merge 导入成功', r.status === 200 && r.json.importedCards === 1 && r.json.bills === 1, JSON.stringify(r.json));
+      // 全库账单 id 唯一
+      const ex = await req('GET', '/api/mycards/export');
+      const ids = ex.json.bills.map((x) => x.id);
+      check('全库账单 id 无重复', new Set(ids).size === ids.length, JSON.stringify(ids));
+
+      // 9b. amount 型 0 元/负数消费被拦截，count 型豁免
+      const zero = makeBackup({ myCards: [Object.assign({}, makeBackup().myCards[0], { id: 'mc-zero', billGroupId: '' })] });
+      zero.cardTypes = makeBackup().cardTypes;
+      zero.consumptions = [
+        { id: 'zc-1', myCardId: 'mc-zero', type: 'amount', date: '2026-10-01', amount: 0, channel: '微信支付', category: '餐饮' },
+        { id: 'zc-2', myCardId: 'mc-zero', type: 'amount', date: '2026-10-02', amount: -5, channel: '微信支付', category: '餐饮' },
+        { id: 'zc-3', myCardId: 'mc-zero', type: 'count', date: '2026-10-03', amount: 0, count: 3, channel: '微信支付', category: '餐饮' },
+      ];
+      const r2 = await req('POST', '/api/mycards/import', { data: zero, mode: 'replace' });
+      check('0 元备份导入成功', r2.status === 200, r2.text.slice(0, 150));
+      check('amount 型 0/负数消费被拦截（剩 count 1 条）', r2.json.consumptions === 1, r2.json.consumptions);
+
+      // 9c. merge 后组只剩 1 个成员 → 组解散（不残留孤儿组）
+      // 当前库：mc-zero 单卡无组。构造：mc-zero 与新卡 mc-grp 同组，导入后手动删掉一张卡再 merge 同组备份
+      // 更直接：先 replace 两卡同组，再 delete 一张，验证 cleanBillGroups 已有逻辑不受影响；
+      // 这里测导入场景：备份组里 2 张卡，其中 1 张卡种匹配失败被跳过 → 剩 1 张 → 组应解散
+      const half = makeBackup();
+      half.myCards = [
+        Object.assign({}, makeBackup().myCards[0], { id: 'mc-h1', alias: '组员甲', billGroupId: 'grp-h' }),
+        Object.assign({}, makeBackup().myCards[0], { id: 'mc-h2', alias: '组员乙', cardId: 'ghost-card', billGroupId: 'grp-h' }),
+      ];
+      half.bills = [];
+      half.billGroups = [{ id: 'grp-h', name: '孤儿组', createdAt: '2026-01-01T00:00:00.000Z' }];
+      const r3 = await req('POST', '/api/mycards/import', { data: half, mode: 'replace' });
+      check('半数成员匹配失败仍导入 1 张', r3.status === 200 && r3.json.importedCards === 1, JSON.stringify(r3.json));
+      const wrap3 = (await req('GET', '/api/mycards')).json;
+      check('只剩 1 名成员的组已解散', wrap3.billGroups.length === 0, JSON.stringify(wrap3.billGroups));
+      const h1 = wrap3.data.find((m) => m.id === 'mc-h1');
+      check('组员甲组引用已清空', h1 && !h1.billGroupId, h1 && h1.billGroupId);
+    }
+
   } finally {
     await stopServer(child);
   }

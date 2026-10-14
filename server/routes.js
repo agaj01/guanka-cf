@@ -688,8 +688,12 @@ async function handle(method, pathname, url, body, req) {
     let dedupedCards = 0; // merge 模式下「id 已存在」被整体跳过的持卡数（幂等恢复：卡跳过则其记录一并跳过）
     for (const m of data.myCards) {
       if (!m || typeof m !== 'object') continue;
-      // 卡种映射：备份的 cardId 在本库不存在（四元组也匹配不上）时跳过该持卡
-      const dstCardId = cardIdMap.get(String(m.cardId || '')) || cardById.get(String(m.cardId || ''));
+      // 卡种映射：优先四元组匹配（导出→导入的正规路径）；备份 cardId 直接命中本库
+      // 已有卡种时也可用（手工构造的备份）。注意 cardId 命中的必须是「本次备份卡种
+      // 之外」的既有卡种——若备份里同一 srcId 对应多个不同四元组，直接命中会张冠李戴，
+      // 故已走四元组映射的 srcId 不再参与兜底（cardIdMap 里已有首匹配）。
+      const srcId = String(m.cardId || '');
+      const dstCardId = cardIdMap.get(srcId) || cardById.get(srcId);
       const card = dstCardId ? cardById.get(dstCardId) : null;
       if (!card) { continue; }
       // merge 幂等：同 id 持卡已存在 → 视为「库里已有该卡及其数据」，整卡连记录跳过，
@@ -739,18 +743,15 @@ async function handle(method, pathname, url, body, req) {
     // —— 合并账单组（备份里的组先重建，成员引用在下面按备份 billGroupId 关联）——
     const groups = mode === 'merge' ? getBillGroups() : [];
     const groupIdMap = new Map(); // 备份组 id → 新/现有组
-    const existingGroupNames = new Set(groups.map((g) => g.name));
     for (const g of Array.isArray(data.billGroups) ? data.billGroups : []) {
       if (!g || !g.name) continue;
-      const members = (data.myCards || []).filter((m) => m && m.billGroupId === g.id);
-      // 备份组在本库已存在同名组 → 沿用；否则重建（保持名称）
+      // 备份组在本库已存在同名组 → 沿用；否则重建（保持名称）。
+      // 成员归属与节奏校验统一在「组归属回填」阶段按 safeMyCards 实际结果做。
       const exist = groups.find((x) => x.name === g.name);
       if (exist) { groupIdMap.set(String(g.id), exist.id); continue; }
       const newId = (typeof g.id === 'string' && g.id && !groups.some((x) => x.id === g.id)) ? g.id : U.uid();
       groups.push({ id: newId, name: g.name, createdAt: U.parseDateStr(String(g.createdAt || '').slice(0, 10)) ? String(g.createdAt) : nowDate.toISOString() });
-      existingGroupNames.add(g.name);
       groupIdMap.set(String(g.id), newId);
-      void members; // 成员数校验在下面按新 myCards 实际归属统一做
     }
 
     // —— 组归属回填：组内卡必须同还款节奏，与 UI 创建逻辑一致 ——
@@ -763,9 +764,10 @@ async function handle(method, pathname, url, body, req) {
       if (!groupMembers.has(gid)) groupMembers.set(gid, []);
       groupMembers.get(gid).push(mc);
     }
-    // 组内两两校验还款节奏；不一致的成员移出组（保留卡，不整组拒绝）
+    // 组内校验还款节奏：以首张卡为基准逐一比对，不一致的成员移出组（保留卡，不整组拒绝）。
+    // 基准 members[0] 在循环内不会被移出，A-B-A 场景下两张 A 卡节奏一致都会保留。
     const groupErrs = [];
-    for (const [gid, members] of groupMembers) {
+    for (const members of groupMembers.values()) {
       if (members.length < 2) { for (const m of members) m.billGroupId = ''; continue; }
       for (let i = 1; i < members.length; i++) {
         if (!sameRepaySchedule(members[0], members[i], now)) {
@@ -774,13 +776,19 @@ async function handle(method, pathname, url, body, req) {
         }
       }
     }
-    // 清理空组：校验后成员不足 2 的组解散
+    // 清理空组：校验后成员不足 2 的组解散。
+    // merge 模式：本次导入的卡若被移出组，其原组可能只剩 1 个成员（另一张是库里的旧卡），
+    // 此时也该解散——需要按「库中旧卡 + 本次新卡」的合并视图算成员数。
     const aliveGroups = new Set(safeMyCards.map((m) => m.billGroupId).filter(Boolean));
-    const keptGroups = groups.filter((g) => aliveGroups.has(g.id));
-    // merge 模式下已有组不在本次校验范围，原样保留
     const finalGroups = mode === 'merge'
-      ? groups.filter((g) => aliveGroups.has(g.id) || getMyCards().some((m) => m.billGroupId === g.id))
-      : keptGroups;
+      ? groups.filter((g) => {
+          if (!aliveGroups.has(g.id)) return false;
+          // 组内成员 = 本次新卡 + 库中仍指向该组的旧卡；不足 2 解散
+          const oldMembers = getMyCards().filter((m) => m.billGroupId === g.id && !safeMyCards.some((x) => x.id === m.id));
+          const newMembers = safeMyCards.filter((m) => m.billGroupId === g.id);
+          return oldMembers.length + newMembers.length >= 2;
+        })
+      : groups.filter((g) => aliveGroups.has(g.id));
 
     // —— 消费记录（merge 幂等：id 已存在的记录跳过）——
     const safeCons = [];
@@ -792,6 +800,9 @@ async function handle(method, pathname, url, body, req) {
       const newId = (typeof r.id === 'string' && r.id) ? r.id : U.uid();
       existingConsIds.add(newId);
       const amount = Number(r.amount);
+      // 金额必须 > 0（与手工记账 POST /consumptions 口径一致）：count 型无金额豁免，
+      // amount 型 0/负数/非数值是垃圾数据，跳过而不是落库
+      if (r.type !== 'count' && (!isFinite(amount) || amount <= 0)) continue;
       safeCons.push({
         id: newId,
         myCardId: newMyId,
@@ -833,9 +844,13 @@ async function handle(method, pathname, url, body, req) {
     }
 
     // —— 账单 ——
+    // merge 幂等键 1：(卡, 月份) 唯一——同卡同月只留一条（与手工记账约束一致）
     const existingBillKeys = mode === 'merge'
       ? new Set(getBills().map((x) => x.myCardId + '|' + x.month))
       : new Set();
+    // merge 幂等键 2：主键 id 不撞车（消费/权益有 existing 预检，账单此前遗漏——
+    // merge 新卡时若备份账单 id 恰与库中已有账单相同，会写出重复主键）
+    const existingBillIds = new Set(mode === 'merge' ? getBills().map((x) => x.id) : []);
     const safeBills = [];
     for (const r of Array.isArray(data.bills) ? data.bills : []) {
       if (!r || typeof r !== 'object') continue;
@@ -846,8 +861,10 @@ async function handle(method, pathname, url, body, req) {
       if (existingBillKeys.has(key)) continue; // 该卡该月账单已存在，跳过
       existingBillKeys.add(key);
       const amount = Number(r.amount);
+      const newId = (typeof r.id === 'string' && r.id && !existingBillIds.has(r.id)) ? r.id : U.uid();
+      existingBillIds.add(newId);
       safeBills.push({
-        id: (typeof r.id === 'string' && r.id && !safeBills.some((x) => x.id === r.id)) ? r.id : U.uid(),
+        id: newId,
         myCardId: newMyId,
         month: String(r.month),
         amount: isFinite(amount) ? Math.max(0, Math.min(MAX_MONEY, Math.round(amount * 100) / 100)) : 0,

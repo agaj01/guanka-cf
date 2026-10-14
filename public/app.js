@@ -628,14 +628,15 @@ function openBackupImportModal() {
     const file = $('#backup-file').files[0];
     if (!file) return toast('请选择备份 JSON 文件', 'error');
     const mode = $('#backup-mode').value;
-    if (mode === 'replace' && !confirm('确定覆盖？现有持卡数据将被清空，以备份文件为准。')) return;
+    if (mode === 'replace' && !confirm('确定覆盖？现有持卡、消费、权益与账单数据将被清空，以备份文件为准，不可撤销。\n\n建议先点「备份」导出当前数据再操作。')) return;
     btn.disabled = true;
     try {
       const data = JSON.parse(await file.text());
       const r = await api('/api/mycards/import', { method: 'POST', body: { data, mode } });
       const badges =
         '<div class="badge badge-green">恢复 ' + r.importedCards + ' 张持卡</div> ' +
-        (r.skippedCards > 0 ? '<div class="badge badge-yellow" style="margin-left:6px">跳过 ' + r.skippedCards + ' 张（卡种匹配失败）</div>' : '') +
+        (r.dedupedCards > 0 ? '<div class="badge badge-yellow" style="margin-left:6px">已存在跳过 ' + r.dedupedCards + ' 张</div>' : '') +
+        (r.skippedCards > 0 ? '<div class="badge badge-yellow" style="margin-left:6px">卡种匹配失败 ' + r.skippedCards + ' 张</div>' : '') +
         (r.cardTypesAdded > 0 ? '<div class="badge badge-green" style="margin-left:6px">新建卡种 ' + r.cardTypesAdded + ' 个</div>' : '') +
         '<div class="badge" style="margin-left:6px">消费 ' + r.consumptions + ' 条 · 权益 ' + r.benefitRecords + ' 条 · 账单 ' + r.bills + ' 条</div>';
       $('#backup-result').innerHTML = badges +
