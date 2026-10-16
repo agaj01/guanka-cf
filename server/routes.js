@@ -131,6 +131,34 @@ const BENEFIT_TYPES = ['境内接送机', '境外接送机', '境内机场贵宾
 const CHANNELS = ['微信支付', '支付宝支付', '云闪付线上', '云闪付线下', 'ApplePay', '其他手机Pay', '美团支付', '抖音支付', '京东支付', '程支付', '多多支付', 'POS机刷卡'];
 const CATEGORIES = ['餐饮', '购物', '交通', '加油', '超市', '旅行', '娱乐', '医疗', '教育', '其他'];
 
+// ---- 「我的持卡」批量导入 CSV ----
+// 与卡种 CSV 的区别：卡种 CSV 描述「市面上有什么卡」，本表描述「我持有哪张卡」。
+// 前 4 列（银行/卡片名称/卡组织/卡等级）是匹配卡种库的四元组，其余列是持卡人自己的数据。
+const MYCARD_FIELDS = [
+  'bank', 'name', 'org', 'level',
+  'alias', 'last4', 'creditLimit', 'monthlySpendTarget',
+  'billingDay', 'repayMode', 'repayValue', 'graceDays', 'maxInterestDays',
+  'feeMonth', 'feeDay', 'waivedYear', 'countPeriodYear', 'benefits',
+];
+const MYCARD_CSV_HEADER = [
+  '银行', '卡片名称', '卡组织', '卡等级',
+  '别名', '卡号后四位', '授信额度', '月消费目标',
+  '账单日', '还款方式', '还款值', '宽限期', '最长免息期',
+  '年费收取月', '年费收取日', '已达标年份', '已刷核定期', '权益',
+];
+
+// 模板示例行：首行演示「卡种库里已有」的标准用法，次行演示「权益多字段写法」
+const MYCARD_CSV_SAMPLES = [
+  ['招商银行', '经典白金信用卡', '银联+Mastercard', '白金卡',
+    '我的招行白', '6688', '50000', '8000',
+    '5', '每月固定日', '20', '3', '50',
+    '3', '15', '', '', '机场贵宾厅:6:自然年|生日10倍积分:1:自然年'],
+  ['中国银行', '长城环球通信用卡', 'VISA', '金卡',
+    '', '1234', '30000', '',
+    '12', '账单日后N天', '20', '5', '',
+    '6', '1', '', '', '境外返现:1:自然月'],
+];
+
 let store;
 
 function init(s) {
@@ -469,6 +497,8 @@ function matchRoute(method, pathname) {
     ['DELETE', /^\/api\/cards\/([^/]+)$/],
     ['GET', /^\/api\/mycards\/export$/],
     ['POST', /^\/api\/mycards\/import$/],
+    ['GET', /^\/api\/mycards\/template\.csv$/],
+    ['POST', /^\/api\/mycards\/import-csv$/],
     ['GET', /^\/api\/mycards$/],
     ['POST', /^\/api\/mycards$/],
     ['PUT', /^\/api\/mycards\/([^/]+)$/],
@@ -514,7 +544,7 @@ async function handle(method, pathname, url, body, req) {
 
   // ---- 基础 ----
   if (pathname === '/api/health') return json({ ok: true, version: '1.0.0', time: now.toISOString() });
-  if (pathname === '/api/meta') return json({ channels: CHANNELS, categories: CATEGORIES, waiverTypes: WAIVER_TYPES, resetCycles: RESET_CYCLES, benefitTypes: BENEFIT_TYPES, csvHeader: CSV_HEADER });
+  if (pathname === '/api/meta') return json({ channels: CHANNELS, categories: CATEGORIES, waiverTypes: WAIVER_TYPES, resetCycles: RESET_CYCLES, benefitTypes: BENEFIT_TYPES, csvHeader: CSV_HEADER, mycardsCsvHeader: MYCARD_CSV_HEADER, maxImportCards: MAX_IMPORT_CARDS });
   if (pathname === '/api/shutdown') {
     // 需要鉴权（由 index.js 的 auth.guard 保证）；此处再加一层同源校验，
     // 阻断「隐藏表单 POST 到 /api/shutdown」这类 CSRF（GET/跨站来源一律拒绝）
@@ -932,6 +962,102 @@ async function handle(method, pathname, url, body, req) {
       billGroups: finalGroups.length,
       groupWarnings: groupErrs,
     }, 200);
+  }
+
+  // ---- 「我的持卡」批量导入 CSV ----
+  // 模板下载：只给表头 + 两行示例，示例行由前端提示「可删除」，服务端不特殊处理。
+  // BOM 与 \r\n 由 U.toCSV 统一产出（Excel/Windows 双击打开才不乱码）——此处**不要**再补 BOM，
+  // 否则文件头会出现两个 EF BB BF，部分老版本 Excel 会把首个单元格读成乱码。
+  if (pathname === '/api/mycards/template.csv' && method === 'GET') {
+    const rows = [MYCARD_CSV_HEADER, ...MYCARD_CSV_SAMPLES];
+    const csv = U.toCSV(rows);
+    return {
+      csv,
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="mycards-template.csv"',
+        'Cache-Control': 'no-store',
+      },
+    };
+  }
+
+  // 持卡 CSV 导入：与卡种 CSV 导入（/api/cards/import）同构，但落的是「我的持卡」。
+  // 卡种匹配规则：按 银行+名称+卡组织+卡等级 四元组在卡种库里找；找不到则自动补建卡种
+  // （与 JSON 备份恢复的兜底策略一致，避免用户因为卡种库里缺一张卡就整行导入失败）。
+  if (pathname === '/api/mycards/import-csv' && method === 'POST') {
+    const text = typeof body === 'string' ? body : (body && body.csv) || '';
+    if (!text.trim()) return err('CSV 内容为空');
+    const rows = U.parseCSV(text);
+    if (rows.length < 2) return err('CSV 只有表头或无数据行');
+    if (rows.length - 1 > MAX_IMPORT_CARDS) return err('CSV 含 ' + (rows.length - 1) + ' 行持卡，超出单次导入上限 ' + MAX_IMPORT_CARDS);
+
+    const cards = getCards();
+    const cardByKey = new Map(cards.map((c) => [cardKey(c), c]));
+    const myCards = getMyCards();
+    const added = [];
+    const skipped = [];
+    const errors = [];
+    let cardTypesAdded = 0;
+
+    rows.slice(1).forEach((row, i) => {
+      const lineNo = i + 2;
+      const raw = {};
+      MYCARD_CSV_HEADER.forEach((h, ci) => { raw[MYCARD_FIELDS[ci]] = (row[ci] == null ? '' : String(row[ci])).trim(); });
+      if (!raw.bank || !raw.name) { errors.push({ line: lineNo, msg: '银行或卡片名称为空' }); return; }
+
+      // 1) 匹配卡种；缺失则自动建一个只有四元组 + 兜底值的卡种
+      const wantKey = [raw.bank, raw.name, raw.org, raw.level].join('|');
+      let card = cardByKey.get(wantKey);
+      if (!card) {
+        card = normalizeCard({ bank: raw.bank, name: raw.name, org: raw.org, level: raw.level }, null);
+        cards.push(card);
+        cardByKey.set(wantKey, card);
+        cardTypesAdded++;
+      }
+
+      // 2) 同一张卡（同 cardId + 同后四位）已存在 → 跳过，保证重复导入幂等
+      const last4 = raw.last4.replace(/\D/g, '').slice(0, 4);
+      if (myCards.some((m) => m.cardId === card.id && String(m.last4 || '') === last4)) {
+        skipped.push({ line: lineNo, name: raw.name, msg: last4 ? '同卡同后四位已存在' : '同卡已存在（未填后四位）' });
+        return;
+      }
+
+      // 3) 组装持卡（字段归一与 POST /api/mycards 完全一致，避免两条路径产出不同结构）
+      const fee = U.clampFeeDate(raw.feeMonth, raw.feeDay);
+      const repayMode = /账单日后/.test(raw.repayMode) ? 'afterBill' : 'fixed';
+      const repayValue = clampDay(raw.repayValue, 20);
+      const mc = {
+        id: U.uid(),
+        cardId: card.id,
+        bank: card.bank, name: card.name, org: card.org, level: card.level,
+        annualFee: card.annualFee, waiverType: card.waiverType, waiverCondition: card.waiverCondition, waiverPolicy: card.waiverPolicy,
+        alias: raw.alias,
+        creditLimit: nonNeg(U.parseAmount(raw.creditLimit), card.startCredit),
+        billingDay: clampDay(raw.billingDay, 1),
+        repaymentDay: repayMode === 'fixed' ? Math.min(31, Math.max(1, repayValue || 20)) : clampDay(raw.repayValue, 20),
+        repayMode,
+        repayValue,
+        graceDays: Math.max(0, Math.min(30, Math.round(Number(raw.graceDays) || 0))),
+        waivedYear: Math.max(0, Math.round(Number(raw.waivedYear) || 0)),
+        countPeriodYear: Math.max(0, Math.round(Number(raw.countPeriodYear) || 0)),
+        maxInterestDays: Math.max(0, Math.min(120, Math.round(Number(raw.maxInterestDays) || 0))),
+        feeMonth: fee.m,
+        feeDay: fee.d,
+        last4,
+        monthlySpendTarget: nonNeg(U.parseAmount(raw.monthlySpendTarget), 0),
+        benefits: parseBenefitSpec(raw.benefits, card.benefits),
+        pointsDeducted: false, pointsDeductDate: null,
+        assetWaived: false, assetWaivedDate: null,
+        billGroupId: '',
+        createdAt: now.toISOString(),
+      };
+      myCards.push(mc);
+      added.push({ line: lineNo, name: card.name, bank: card.bank, id: mc.id });
+    });
+
+    if (added.length && cardTypesAdded) store.write('cards', cards);
+    if (added.length) store.write('mycards', myCards);
+    return json({ added: added.length, skipped, errors, cardTypesAdded, total: myCards.length });
   }
   if (pathname === '/api/mycards' && method === 'GET') {
     const idx = buildIndexes();
@@ -1485,6 +1611,32 @@ function validCount(v) {
   const n = Math.round(Number(v));
   if (!isFinite(n) || n <= 0) return null;
   return Math.min(MAX_COUNT, n);
+}
+
+/**
+ * 解析 CSV 里的「权益」列 → normalizeBenefits 能吃的对象数组。
+ * 单个权益写法：`名称:次数:重置周期`，冒号段可省略（默认 1 次 / 自然年）；
+ * 次数填 -1 表示不限次。多个权益用 `|` 分隔。
+ * 例：`机场贵宾厅:6:自然年|生日10倍积分:1:自然年`
+ */
+function parseBenefitSpec(spec, fallbackNames) {
+  const s = String(spec || '').trim();
+  if (!s) {
+    // 留空时按卡种默认权益走（与表单里不勾选权益的行为一致）
+    return normalizeBenefits(undefined, fallbackNames);
+  }
+  const items = s.split('|').map((seg) => {
+    const parts = seg.split(':').map((x) => x.trim());
+    const name = parts[0];
+    if (!name) return null;
+    const total = parts.length > 1 && parts[1] !== '' ? Math.round(Number(parts[1])) : 1;
+    return {
+      name,
+      total: isFinite(total) ? total : 1,
+      resetCycle: parts[2] || '自然年',
+    };
+  }).filter(Boolean);
+  return normalizeBenefits(items, fallbackNames);
 }
 
 function normalizeBenefits(benefits, fallbackNames) {

@@ -260,10 +260,11 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (result.csv !== undefined) {
-        send(res, 200, result.csv, {
+        // headers 允许调用方覆盖（如持卡模板要自定义文件名）；缺省沿用卡种导出的老行为
+        send(res, 200, result.csv, Object.assign({
           'Content-Type': 'text/csv; charset=utf-8',
           'Content-Disposition': 'attachment; filename="cards-export.csv"',
-        });
+        }, result.headers || {}));
         return;
       }
       if (result.ics !== undefined) {

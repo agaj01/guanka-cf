@@ -245,6 +245,7 @@ function renderMyCards() {
     '<button class="btn primary" id="btn-add-card">＋ 添加持卡</button>' +
     '<button class="btn" id="btn-billgroups">合并账单</button>' +
     '<button class="btn" id="btn-export">导出持卡</button>' +
+    '<button class="btn" id="btn-mycards-import">批量导入</button>' +
     '<button class="btn" id="btn-backup-export">备份</button>' +
     '<button class="btn" id="btn-backup-import">恢复</button>' +
     '<select id="filter-select" class="filter-select">' +
@@ -468,6 +469,8 @@ function bindPageEvents() {
   if (backupExpBtn) backupExpBtn.addEventListener('click', exportBackup);
   const backupImpBtn = $('#btn-backup-import', app);
   if (backupImpBtn) backupImpBtn.addEventListener('click', openBackupImportModal);
+  const myImportBtn = $('#btn-mycards-import', app);
+  if (myImportBtn) myImportBtn.addEventListener('click', openMyCardsImportModal);
   const bgBtn = $('#btn-billgroups', app);
   if (bgBtn) bgBtn.addEventListener('click', openBillGroupsModal);
 
@@ -652,6 +655,105 @@ function openBackupImportModal() {
     } catch (e) { toast(e.message, 'error'); }
     btn.disabled = false;
   });
+}
+
+// ---------- 持卡批量导入：CSV（含模板下载） ----------
+// 与「卡种批量导入」同构，但落的是「我的持卡」。
+// 前 4 列（银行/卡片名称/卡组织/卡等级）用于匹配卡种库；库里没有会自动补建卡种。
+function openMyCardsImportModal() {
+  const header = (state.meta.mycardsCsvHeader || []).join(',');
+  const maxCards = state.meta.maxImportCards || 500;
+  openModal(
+    '<div class="modal-title">批量导入持卡（CSV）</div>',
+    '<div style="font-size:12px;color:var(--text-2);margin-bottom:10px;line-height:1.7">' +
+    '前 4 列 <b>银行、卡片名称、卡组织、卡等级</b> 用于匹配卡种库；库里没有的卡会<b>自动补建卡种</b>。' +
+    '<br>同一张卡（同卡种 + 同后四位）已存在时会自动跳过，重复导入不会产生重复持卡。' +
+    '<br>权益列写法：<code>名称:次数:周期</code>，多条用 <code>|</code> 分隔，例如 <code>机场贵宾厅:6:自然年|生日10倍积分:1:自然年</code>（次数填 <code>-1</code> 表示不限次）。' +
+    '<br>单次最多导入 ' + maxCards + ' 行。</div>' +
+    '<div id="myimp-step1">' +
+    '<div class="field" style="margin-bottom:10px"><label>① 下载模板（含表头与 2 行示例，用 Excel 打开填好再上传）</label>' +
+    '<button class="btn" id="btn-myimp-template" type="button">下载 CSV 模板</button>' +
+    '<span style="font-size:12px;color:var(--text-3);margin-left:8px">列顺序：' + esc(header) + '</span></div>' +
+    '<div class="field" style="margin-bottom:10px"><label>② 选择填好的 CSV 文件</label><input type="file" id="myimp-file" accept=".csv,text/csv"></div>' +
+    '<div class="field"><label>或直接粘贴 CSV 内容</label><textarea id="myimp-text" style="min-height:120px" placeholder="银行,卡片名称,卡组织,卡等级,别名,…"></textarea></div>' +
+    '</div>' +
+    '<div id="myimp-result" style="margin-top:10px"></div>',
+    '<button class="btn" data-close>取消</button><button class="btn primary" id="btn-do-myimp">开始导入</button>'
+  );
+
+  $('#btn-myimp-template').addEventListener('click', downloadMyCardsTemplate);
+
+  $('#btn-do-myimp').addEventListener('click', async () => {
+    const btn = $('#btn-do-myimp');
+    if (btn.disabled) return; // 防重复提交：文件读取 + 服务端解析期间按钮置灰
+    const file = $('#myimp-file').files[0];
+    let text = $('#myimp-text').value;
+    if (file) {
+      try { text = await file.text(); }
+      catch (e) { return toast('文件读取失败：' + (e.message || e.name), 'error'); }
+    }
+    if (!text.trim()) return toast('请选择文件或粘贴 CSV 内容', 'error');
+    // 前置拦截：BOM 之外的行数明显超限时直接拒绝，省去一次无用上传
+    const lineGuess = text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/).filter((l) => l.trim()).length - 1;
+    if (lineGuess > maxCards) return toast('CSV 约 ' + lineGuess + ' 行，超过单次上限 ' + maxCards + ' 行', 'error');
+
+    btn.disabled = true;
+    btn.textContent = '导入中…';
+    try {
+      const r = await api('/api/mycards/import-csv', { method: 'POST', body: { csv: text } });
+      renderMyCardsImportResult(r);
+      if (r.added > 0) toast('导入完成：新增 ' + r.added + ' 张持卡');
+      else toast('没有新增持卡，请查看下方明细');
+      await loadAll();
+      const again = $('#btn-do-myimp');
+      if (again) { again.disabled = false; again.textContent = '再次导入'; }
+      return;
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    btn.disabled = false;
+    btn.textContent = '开始导入';
+  });
+}
+
+function downloadMyCardsTemplate() {
+  // 走 api() 而非 <a href>：未登录/令牌失效时能给出可读提示，而不是静默下载一段 JSON
+  api('/api/mycards/template.csv')
+    .then((csv) => {
+      let text = typeof csv === 'string' ? csv : String(csv);
+      // fetch 的 Response.text() 按规范会剥掉开头的 BOM，直接落盘会让 Excel 把中文读成乱码
+      //（Windows 版 Excel 靠 BOM 判定 UTF-8）——这里补回来。
+      if (text.charCodeAt(0) !== 0xFEFF) text = '\uFEFF' + text;
+      const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'mycards-template.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast('模板已下载，用 Excel 填好后回到这里导入');
+    })
+    .catch((e) => toast('模板下载失败：' + e.message, 'error'));
+}
+
+function renderMyCardsImportResult(r) {
+  const parts = [];
+  parts.push('<div class="badge badge-green">新增 ' + r.added + ' 张持卡</div>');
+  if (r.skipped.length) parts.push('<div class="badge badge-yellow" style="margin-left:6px">跳过 ' + r.skipped.length + ' 张（已存在）</div>');
+  if (r.errors.length) parts.push('<div class="badge badge-red" style="margin-left:6px">' + r.errors.length + ' 行有误</div>');
+  if (r.cardTypesAdded) parts.push('<div class="badge badge-green" style="margin-left:6px">自动新建卡种 ' + r.cardTypesAdded + ' 个</div>');
+  parts.push('<div class="badge" style="margin-left:6px">当前共 ' + r.total + ' 张持卡</div>');
+
+  let detail = '';
+  const rows = [];
+  for (const s of r.skipped) rows.push('<tr><td>' + s.line + '</td><td>' + esc(s.name || '') + '</td><td style="color:#b8860b">跳过</td><td>' + esc(s.msg) + '</td></tr>');
+  for (const e of r.errors) rows.push('<tr><td>' + e.line + '</td><td>' + esc(e.name || '') + '</td><td style="color:#c0392b">有误</td><td>' + esc(e.msg) + '</td></tr>');
+  if (rows.length) {
+    detail = '<div style="margin-top:8px;max-height:200px;overflow:auto"><table class="record-table"><thead><tr><th>行号</th><th>卡片</th><th>结果</th><th>说明</th></tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
+  }
+  $('#myimp-result').innerHTML = parts.join('') + detail;
 }
 
 function showFeeExpiring() {
