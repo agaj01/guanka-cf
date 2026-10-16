@@ -311,6 +311,22 @@ input, select, textarea { font-family: inherit; font-size: 14px; }
 .pick-card-name { flex: 1; font-size: 13px; }
 .pick-card-meta { font-size: 11px; color: var(--text-3); }
 
+/* 自定义卡片入口与表单 */
+.pick-custom {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; margin-bottom: 12px;
+  background: var(--surface-2); border: 1px dashed var(--border); border-radius: 8px;
+}
+.pick-custom-tip { font-size: 12px; color: var(--text-3); }
+.custom-card-form { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.custom-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.custom-card-title { font-size: 13px; font-weight: 700; color: var(--gold-deep); }
+[data-theme="dark"] .custom-card-title { color: var(--gold); }
+.custom-card-divider {
+  margin: 16px 0 10px; padding-top: 12px; border-top: 1px solid var(--border);
+  font-size: 13px; font-weight: 600; color: var(--text-2);
+}
+
 /* 账单提示行 */
 .bill-hint { margin-top: 8px; font-size: 12px; color: var(--text-2); line-height: 1.8; }
 /* 筛选下拉 */

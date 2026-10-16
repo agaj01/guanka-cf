@@ -1,5 +1,5 @@
 /* ============================================================
- * 管卡 — 信用卡管理工具（Docker 版）前端 SPA
+ * 管卡 — 信用卡管理工具 前端 SPA
  * 数据全部来自 /api，无构建步骤，原生 ES2018+
  * ============================================================ */
 'use strict';
@@ -255,7 +255,7 @@ function renderMyCards() {
     option('name', '按名称') + option('fee', '按年费临近') + option('repay', '按还款临近') + option('bank', '按银行') +
     '</select>' +
     '<div class="spacer"></div>' +
-    '<span style="font-size:12px;color:var(--text-3)">数据保存在 Docker 卷中，重启不丢失</span>' +
+    '<span style="font-size:12px;color:var(--text-3)">数据自动保存，重启与升级都不丢失</span>' +
     '</div>';
 
   if (!state.myCards.length) {
@@ -1333,15 +1333,85 @@ function closeModal() {
 // ---------- 弹窗：添加 / 编辑持卡 ----------
 function openAddCardModal() {
   const pickHtml =
+    '<div class="pick-custom" id="pick-custom-entry">' +
+    '<button class="btn" id="btn-custom-card">＋ 自定义卡片（卡种库里没有）</button>' +
+    '<span class="pick-custom-tip">手头是卡种库中没有的卡？点这里直接新建</span></div>' +
     '<div class="search-box"><input id="pick-search" placeholder="搜索银行或卡片名称…"></div>' +
     '<div class="pick-list" id="pick-list"></div>' +
     '<div id="pick-form" style="margin-top:14px"></div>';
   openModal('<div class="modal-title">添加持卡</div>', pickHtml,
     '<button class="btn" data-close>取消</button><button class="btn primary" id="btn-save-mycard">保存</button>');
-  const selected = { cardId: null };
+  // custom = null 表示「从卡种库选卡」；custom = {bank,name,...} 表示「自定义新建」
+  const selected = { cardId: null, custom: null };
   renderPickList(selected, '');
   $('#pick-search').addEventListener('input', (e) => renderPickList(selected, e.target.value.trim()));
+  $('#btn-custom-card').addEventListener('click', () => openCustomCardForm(selected));
   $('#btn-save-mycard').addEventListener('click', () => saveMyCard(selected, null));
+}
+
+/** 自定义卡片：切到「卡种信息 + 持卡信息」双段表单，隐藏卡种库选择区 */
+function openCustomCardForm(selected) {
+  selected.cardId = null;
+  selected.custom = selected.custom || { bank: '', name: '', level: '', org: '', annualFee: 0, waiverType: state.meta.waiverTypes[0] || '免年费', startCredit: '' };
+  $('#pick-custom-entry').style.display = 'none';
+  $('#pick-search').style.display = 'none';
+  $('#pick-list').style.display = 'none';
+  renderCustomPickForm(selected);
+}
+
+/** 从自定义表单退回卡种库列表 */
+function backToPickList(selected) {
+  selected.custom = null;
+  $('#pick-custom-entry').style.display = '';
+  $('#pick-search').style.display = '';
+  $('#pick-list').style.display = '';
+  $('#pick-form').innerHTML = '';
+  renderPickList(selected, '');
+}
+
+function renderCustomPickForm(selected) {
+  const d = selected.custom;
+  const types = state.meta.waiverTypes || [];
+  const form = $('#pick-form');
+  form.innerHTML =
+    '<div class="custom-card-form">' +
+    '<div class="custom-card-head">' +
+    '<span class="custom-card-title">新建卡种</span>' +
+    '<button class="btn small" id="btn-back-pick">← 返回卡种库</button></div>' +
+    '<div class="form-grid">' +
+    field('银行 <span style="color:var(--red)">*</span>', '<input id="c-bank" value="' + esc(d.bank) + '" placeholder="如 招商银行">') +
+    field('卡片名称 <span style="color:var(--red)">*</span>', '<input id="c-name" value="' + esc(d.name) + '" placeholder="如 经典白金卡">') +
+    field('卡等级', '<input id="c-level" value="' + esc(d.level) + '" placeholder="如 白金卡">') +
+    field('卡组织', '<input id="c-org" value="' + esc(d.org) + '" placeholder="如 银联/VISA">') +
+    field('年费（元）', '<input id="c-fee" type="number" min="0" value="' + esc(d.annualFee) + '" placeholder="如 3600，免年费填 0">') +
+    field('起批额度（元）', '<input id="c-credit" type="number" min="0" step="1000" value="' + esc(d.startCredit) + '" placeholder="如 50000">') +
+    field('免年费类型', '<select id="c-waivertype">' + types.map((t) => '<option' + (d.waiverType === t ? ' selected' : '') + '>' + t + '</option>').join('') + '</select>') +
+    field('刷免条件（选填）', '<input id="c-condition" placeholder="如 10万、10笔、10000">') +
+    '</div>' +
+    '<div class="custom-card-divider">持卡信息</div>' +
+    '<div id="custom-mycard-form"></div>' +
+    '</div>';
+  // 持卡表单：以「临时卡种」为模板渲染，复用 myCardFormHtml 的全部字段与默认值
+  const fake = {
+    id: '__custom__', bank: d.bank, name: d.name || '自定义卡片',
+    org: d.org, level: d.level, annualFee: Number(d.annualFee) || 0,
+    startCredit: Number(d.startCredit) || 0, benefits: [],
+  };
+  $('#custom-mycard-form').innerHTML = myCardFormHtml(fake, null);
+  bindMyCardForm($('#custom-mycard-form'), fake, null);
+  $('#btn-back-pick').addEventListener('click', () => backToPickList(selected));
+  // 卡种字段变化时实时同步到 fake，供保存时读取（这里只做即时回填，避免用户来回切换丢失）
+  ['c-bank', 'c-name', 'c-level', 'c-org', 'c-fee', 'c-credit'].forEach((id) => {
+    const el = $('#' + id, form);
+    if (el) el.addEventListener('input', () => {
+      d.bank = $('#c-bank', form).value.trim();
+      d.name = $('#c-name', form).value.trim();
+      d.level = $('#c-level', form).value.trim();
+      d.org = $('#c-org', form).value.trim();
+      d.annualFee = $('#c-fee', form).value;
+      d.startCredit = $('#c-credit', form).value;
+    });
+  });
 }
 
 function renderPickList(selected, kw) {
@@ -1510,6 +1580,12 @@ async function saveMyCard(selected, editing) {
     if (editing) {
       await api('/api/mycards/' + editing.id, { method: 'PUT', body });
       toast('已保存修改');
+    } else if (selected.custom) {
+      // 自定义卡片：先落卡种（进卡种库），再用新卡种 id 建持卡
+      const cardId = await ensureCustomCardType(selected.custom, form);
+      if (!cardId) return;
+      await api('/api/mycards', { method: 'POST', body: Object.assign({ cardId }, body) });
+      toast('已添加持卡（卡种已存入卡种库）');
     } else {
       if (!selected.cardId) return toast('请先选择一张卡', 'error');
       await api('/api/mycards', { method: 'POST', body: Object.assign({ cardId: selected.cardId }, body) });
@@ -1519,6 +1595,39 @@ async function saveMyCard(selected, editing) {
     await loadAll();
     if (editing) openDrawer(editing.id);
   } catch (e) { toast(e.message, 'error'); }
+}
+
+/**
+ * 自定义卡片落库：创建卡种并返回其 id。
+ * 若卡种库里已有相同「银行+名称+卡组织+卡等级」的卡种，则直接复用，不重复创建。
+ * 返回 null 表示校验未通过（已提示用户）。
+ */
+async function ensureCustomCardType(d, form) {
+  const pick = (id) => { const el = $('#' + id, form); return el ? el.value.trim() : ''; };
+  const card = {
+    bank: pick('c-bank'),
+    name: pick('c-name'),
+    level: pick('c-level'),
+    org: pick('c-org'),
+    annualFee: pick('c-fee') || 0,
+    startCredit: pick('c-credit') || 0,
+    waiverType: pick('c-waivertype') || '免年费',
+    waiverCondition: pick('c-condition'),
+    waiverPolicy: '',
+    benefits: '',
+    applyCondition: '',
+    note: '',
+  };
+  if (!card.bank || !card.name) {
+    toast('请填写「银行」和「卡片名称」', 'error');
+    return null;
+  }
+  // 已存在同键卡种 → 复用（避免服务端因重复而报错，也避免卡种库里出现两份一样的卡）
+  const key = [card.bank, card.name, card.org, card.level].map((x) => String(x || '').trim()).join('|');
+  const dup = (state.cards || []).find((c) => [c.bank, c.name, c.org, c.level].map((x) => String(x || '').trim()).join('|') === key);
+  if (dup) return dup.id;
+  const created = await api('/api/cards', { method: 'POST', body: card });
+  return created.id;
 }
 
 function openMyCardModal(m) {
