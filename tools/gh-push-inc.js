@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { spawnSync } = require('child_process');
 
 const TOKEN = process.env.GH_TOKEN;
 const REPO_ID = process.argv[2] || '1415171548';
@@ -13,12 +14,35 @@ const ROOT = path.join(__dirname, '..');
 const GIT_OBJ = path.join(ROOT, '.git', 'objects');
 const API = 'https://api.github.com';
 
-// ---------- 本地 git 对象解析（loose object） ----------
+// ---------- 本地 git 对象解析（loose object，失败时回退 git cat-file 支持 pack） ----------
+// git gc 后对象会进 packfile，此时 .git/objects/xx/yyy 不存在。
+function readObjLoose(sha) {
+  return zlib.inflateSync(fs.readFileSync(path.join(GIT_OBJ, sha.slice(0, 2), sha.slice(2))));
+}
+function readObjViaGit(sha) {
+  // 注意：tree 必须用 `git cat-file tree <sha>`（不带 -p）取原始二进制——
+  // 带 -p 输出的是 pretty 文本格式（含 "blob" 字样与制表符），直接喂给解析器会崩。
+  const type = gitObjType(sha);
+  const args = type === 'tree' ? ['cat-file', 'tree', sha] : ['cat-file', 'blob', sha];
+  const r = spawnSync('git', type === 'commit' ? ['cat-file', 'commit', sha] : args, { cwd: ROOT });
+  if (r.status !== 0) throw new Error('git cat-file 失败: ' + (r.stderr || '').toString().slice(0, 120));
+  return r.stdout; // 已是去掉 "<type> <size>\0" 头的裸内容
+}
 function readObj(sha) {
-  const buf = zlib.inflateSync(fs.readFileSync(path.join(GIT_OBJ, sha.slice(0, 2), sha.slice(2))));
+  let buf;
+  try {
+    buf = readObjLoose(sha);
+  } catch (e) {
+    // packfile 回退：本函数所有调用点都只取 body，故这里直接构造同样的形态
+    return { type: gitObjType(sha), body: readObjViaGit(sha) };
+  }
   const nul = buf.indexOf(0);
   const header = buf.slice(0, nul).toString('utf8'); // "<type> <size>"
   return { type: header.split(' ')[0], body: buf.slice(nul + 1) };
+}
+function gitObjType(sha) {
+  const r = spawnSync('git', ['cat-file', '-t', sha], { cwd: ROOT });
+  return (r.stdout || '').toString().trim();
 }
 
 function parseCommit(sha) {
