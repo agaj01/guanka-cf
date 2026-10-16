@@ -266,6 +266,10 @@ const server = http.createServer(async (req, res) => {
         });
         return;
       }
+      if (result.ics !== undefined) {
+        send(res, 200, result.ics, result.headers);
+        return;
+      }
       send(res, result.status || 200, result.body, result.headers);
       return;
     }

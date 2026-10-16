@@ -5,6 +5,7 @@ const U = require('./util');
 const { SEED_CARDS, SEED_VERSION } = require('./seed');
 const notifier = require('./notifier');
 const reminder = require('./reminder');
+const ics = require('./ics');
 const D = require('./dates');
 
 // 账单流水（月账单 + 是否已还）
@@ -486,6 +487,7 @@ function matchRoute(method, pathname) {
     ['POST', /^\/api\/notify\/test$/],
     ['POST', /^\/api\/notify\/check$/],
     ['GET', /^\/api\/notify\/history$/],
+    ['GET', /^\/api\/calendar\.ics$/],
     ['GET', /^\/api\/bills$/],
     ['POST', /^\/api\/bills$/],
     ['PUT', /^\/api\/bills\/([^/]+)$/],
@@ -1414,6 +1416,23 @@ async function handle(method, pathname, url, body, req) {
   if (pathname === '/api/notify/history' && method === 'GET') {
     const cfg = reminder.normalizeConfig(getNotifyRaw());
     return json({ history: cfg.history || [], enabled: cfg.enabled, intervalMinutes: cfg.intervalMinutes });
+  }
+
+  // ---- ICS 日历订阅 ----
+  // 鉴权已由入口层保证（?token= / Bearer / Cookie 任一）。日历客户端只能带
+  // URL token，浏览器已登录用户则带 Cookie，两条路都通。
+  if (pathname === '/api/calendar.ics' && method === 'GET') {
+    const idx = buildIndexes();
+    const computed = getMyCards().map((m) => computeMyCard(m, now, idx));
+    const text = ics.generateICS(computed, getBills(), now);
+    return {
+      ics: text,
+      headers: {
+        'Content-Type': 'text/calendar; charset=utf-8',
+        'Content-Disposition': 'inline; filename="guanka.ics"',
+        'Cache-Control': 'no-store',
+      },
+    };
   }
 
   const ptsMatch = pathname.match(/^\/api\/mycards\/([^/]+)\/points$/);

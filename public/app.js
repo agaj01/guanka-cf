@@ -691,6 +691,23 @@ function notifyModalHtml(cfg) {
     field('检查间隔（分钟，最小 5）', '<input id="n-interval" type="number" min="5" value="' + esc(cfg.intervalMinutes) + '">') +
     '<div class="field full"><label>账单已过到期日仍未还时提醒</label><select id="n-billOverdue"><option value="1"' + (cfg.rules.billOverdueRemind ? ' selected' : '') + '>开启</option><option value="0"' + (!cfg.rules.billOverdueRemind ? ' selected' : '') + '>关闭</option></select></div>' +
     '</div></div>' +
+    '<div class="notify-rules"><h4>日历订阅（ICS）</h4>' +
+    '<div style="font-size:12px;color:var(--text-2);line-height:1.7;margin-bottom:8px">' +
+    '把还款日、年费日、账单到期、刷卡任务截止导入系统日历（Apple 日历 / Google 日历 / Outlook 等订阅后自动更新）。' +
+    '因日历客户端无法携带登录 Cookie，订阅链接需带访问令牌——在下方输入令牌生成完整链接，或手动拼接 <code>/api/calendar.ics?token=你的令牌</code>。' +
+    '</div>' +
+    '<div class="form-grid">' +
+    '<div class="field full"><label>访问令牌（仅用于本地拼链接，不会发送保存）</label><input id="n-ics-token" type="password" placeholder="AUTH_TOKEN" autocomplete="off"></div>' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">' +
+    '<button class="btn" id="n-ics-gen" type="button">生成订阅链接</button>' +
+    '<button class="btn" id="n-ics-copy" type="button" style="display:none">复制链接</button>' +
+    '</div>' +
+    '<div id="n-ics-out" style="margin-top:8px;display:none">' +
+    '<input id="n-ics-url" readonly style="width:100%;font-size:12px;font-family:monospace;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);color:var(--text-1)">' +
+    '<div style="font-size:11px;color:var(--text-3);margin-top:4px">包含事件：还款日（含宽限期）、年费日、账单到期（未还含逾期）、刷卡任务截止；约 6 个月滚动窗口；提前 1 天提醒。</div>' +
+    '</div>' +
+    '</div>' +
     '<div id="n-result" class="notify-result"></div>' +
     (cfg.history && cfg.history.length ? '<div class="notify-rules"><h4>最近推送记录</h4>' +
       cfg.history.slice(0, 8).map((h) => '<div class="nh-item"><span class="badge ' + (h.ok ? 'badge-green' : 'badge-red') + '">' + (h.ok ? '已推送' : '失败') + '</span>' +
@@ -730,6 +747,28 @@ async function openNotifyModal() {
   });
 
   const showResult = (html) => { const r = $n('n-result'); if (r) r.innerHTML = html; };
+
+  // ---- 日历订阅链接生成 ----
+  let icsUrl = '';
+  $n('n-ics-gen').addEventListener('click', () => {
+    const t = ($n('n-ics-token').value || '').trim();
+    if (!t) { showResult('<div class="badge badge-yellow">请先输入访问令牌</div>'); return; }
+    icsUrl = location.origin + '/api/calendar.ics?token=' + encodeURIComponent(t);
+    const out = $n('n-ics-out');
+    out.style.display = '';
+    $n('n-ics-url').value = icsUrl;
+    $n('n-ics-copy').style.display = '';
+  });
+  $n('n-ics-copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(icsUrl);
+      showResult('<div class="badge badge-green">已复制，粘贴到日历 App 的「订阅日历」即可</div>');
+    } catch (e) {
+      // 剪贴板 API 失败（非 https 或权限拒绝）→ 选中输入框让用户手动复制
+      $n('n-ics-url').select();
+      showResult('<div class="badge badge-yellow">请手动 Ctrl+C 复制</div>');
+    }
+  });
 
   $n('n-save').addEventListener('click', async () => {
     try {
