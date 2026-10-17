@@ -179,11 +179,19 @@ async function boot() {
 }
 
 async function loadAll() {
-  // mycards 响应已合并 stats/banks（服务端一次索引计算），省去一次全量统计请求
-  let settings, meta, mycardsResp, cards, bills;
+  // mycards 响应已合并 stats/bills/billGroups（服务端一次索引计算），省去单独的统计请求。
+  // 主数据与扩展资产合并为一批并行：两组接口互不依赖，串行两批白白多等一个网络往返。
+  // 扩展资产单独兜底：老备份/异常时降级为空列表，不阻塞主页面。
+  const fallbackAssets = () => ({ memberships: [], vouchers: [], voucherBrands: [], knowledge: [], assetStats: null });
+  let settings, meta, mycardsResp, cards, bills, assets;
   try {
-    [settings, meta, mycardsResp, cards, bills] = await Promise.all([
+    [settings, meta, mycardsResp, cards, bills, assets] = await Promise.all([
       api('/api/settings'), api('/api/meta'), api('/api/mycards'), api('/api/cards'), api('/api/bills'),
+      Promise.all([
+        api('/api/memberships'), api('/api/vouchers'), api('/api/voucherbrands'), api('/api/knowledge'), api('/api/assets/stats'),
+      ]).then(([memberships, vouchers, voucherBrands, knowledge, assetStats]) =>
+        ({ memberships, vouchers, voucherBrands, knowledge, assetStats })
+      ).catch(fallbackAssets),
     ]);
   } catch (e) {
     // 未授权：showLogin 已由 api() 弹出，这里静默退出避免覆盖登录层
@@ -193,20 +201,17 @@ async function loadAll() {
   state.settings = settings;
   state.meta = meta;
   state.myCards = mycardsResp.data || mycardsResp;
-  state.stats = mycardsResp.stats || (await api('/api/stats'));
+  state.stats = mycardsResp.stats || null;
   state.billGroups = mycardsResp.billGroups || [];
   state.cards = cards;
   state.bills = bills || [];
+  state.memberships = assets.memberships;
+  state.vouchers = assets.vouchers;
+  state.voucherBrands = assets.voucherBrands;
+  state.knowledge = assets.knowledge;
+  state.assetStats = assets.assetStats;
   // 数据已刷新：若开启了 gist 云同步，防抖后自动上传最新备份
   scheduleSyncPush();
-  // 扩展资产：加载失败不阻塞主页面（老备份/异常时优雅降级为空列表）
-  try {
-    [state.memberships, state.vouchers, state.voucherBrands, state.knowledge, state.assetStats] = await Promise.all([
-      api('/api/memberships'), api('/api/vouchers'), api('/api/voucherbrands'), api('/api/knowledge'), api('/api/assets/stats'),
-    ]);
-  } catch (e) {
-    state.memberships = []; state.vouchers = []; state.voucherBrands = []; state.knowledge = []; state.assetStats = null;
-  }
   applyTheme(settings.theme || 'light');
   render();
 }
