@@ -83,6 +83,12 @@ const appFetch = async (url) => {
 // fetch 分发：github.com 开头走 mock GH，其余走 mock 管卡后端
 const fetchDispatch = (url, opts) => (String(url).indexOf('https://api.github.com') === 0 ? mockFetch(url, opts) : appFetch(url, opts));
 
+// 检查 _skipNextPush 是否被 scheduleSyncPush 消费
+function SYNC_skipNextPushConsumed(ctx) {
+  const v = vm.runInContext('SYNC._skipNextPush', ctx);
+  return v === false;
+}
+
 const sandbox = {
   console, localStorage,
   crypto: globalThis.crypto,           // Node 20 内置 WebCrypto，与浏览器一致
@@ -152,14 +158,35 @@ async function main() {
   ok(pulled && pulled.schema === 'guanka-backup', 'syncPull 返回解密后的备份对象');
   ok(pulled.cardTypes[0].bank === '招商银行', '拉取数据与推送数据一致');
 
-  console.log('\n== 6. 防抖 scheduleSyncPush ==');
+  console.log('\n== 6. 防抖安全阀：未校验前禁止自动上传（防覆盖云端备份）==');
   sandbox.__timer = null;
-  vm.runInContext('scheduleSyncPush()', ctx);
-  ok(typeof sandbox.__timer === 'function', '防抖定时器已挂起（未立即上传）');
+  vm.runInContext('SYNC._restored = false; SYNC._skipNextPush = false; scheduleSyncPush()', ctx);
+  ok(sandbox.__timer === null, '首次云端校验未完成：自动上传被封锁（防空数据覆盖云端）');
+  vm.runInContext('SYNC._restored = true; scheduleSyncPush()', ctx);
+  ok(typeof sandbox.__timer === 'function', '校验完成后防抖定时器正常挂起');
   const logBefore = ghCallLog.length;
   sandbox.__timer(); // 触发防抖回调（回调内部 syncPush().catch(()=>{}) 不回传 promise）
   for (let i = 0; i < 50 && ghCallLog.length === logBefore; i++) await new Promise((r) => setTimeout(r, 20));
   ok(ghCallLog.length > logBefore, '防抖到期后触发一次上传');
+
+  console.log('\n== 6b. _skipNextPush：恢复导入后跳过一次冗余回传 ==');
+  vm.runInContext('SYNC._skipNextPush = true; scheduleSyncPush()', ctx);
+  ok(SYNC_skipNextPushConsumed(ctx), 'skip 标记被消费，本轮不上传');
+
+  console.log('\n== 6c. 并发互斥：推送进行中复用同一 promise ==');
+  ghCallLog = [];
+  vm.runInContext('SYNC.gistId = "mock-gist-id-123"', ctx);
+  const p1 = vm.runInContext('(async () => syncPush())()', ctx);
+  const p2 = vm.runInContext('(async () => syncPush())()', ctx);
+  await Promise.all([p1, p2]);
+  const patches = ghCallLog.filter((c) => c.method === 'PATCH').length;
+  ok(patches === 1, '并发两次调用只产生一次 PATCH（其余复用 _pushing）');
+
+  console.log('\n== 6d. Gist 被删后 PATCH 404 自动重建 ==');
+  ghCallLog = [];
+  vm.runInContext('SYNC.gistId = "deleted-gist"', ctx);
+  await vm.runInContext('(async () => syncPush())()', ctx);
+  ok(vm.runInContext('SYNC.gistId', ctx) === 'mock-gist-id-123', '404 后清 gistId 并重建成功');
 
   console.log('\n== 7. 恢复链路（syncPull → import merge）==');
   // 直接验证解密产物能通过 /api/mycards/import 的 schema 校验结构

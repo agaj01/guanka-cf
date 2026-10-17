@@ -83,6 +83,8 @@ function showLogin(message) {
       $('#modal-root').innerHTML = '';
       toast('已登录');
       await loadAll();
+      // 登录成功后重试云同步校验（启动时若因 401 失败，这里补上恢复+放行自动上传）
+      initCloudSync().catch(() => {});
     } catch (e) {
       $('#login-tip').textContent = e.message;
       $('#login-tip').style.display = '';
@@ -703,23 +705,34 @@ function openBackupImportModal() {
 // 数据经 AES-GCM 端到端加密后存入你的「私密 Gist」；两端填相同
 // GitHub Token + 同步密码即可共享（Gist ID 首次上传自动生成）。
 // 纯前端直连 GitHub API，Docker 版 / Workers 版行为完全一致，服务端零改动。
+//
+// 安全阀（防数据丢失）：开启同步后必须先完成一次云端校验/恢复（_restored=true）
+// 才允许自动上传。否则「本地空数据 + 云端有备份」时一次防抖上传就会把云端备份
+// 覆盖为空——换设备/清缓存后登录的瞬间最容易踩中。手动「立即上传」不受限。
 const SYNC = {
   token: (function () { try { return localStorage.getItem('ghToken') || ''; } catch (e) { return ''; } })(),
   gistId: (function () { try { return localStorage.getItem('ghGistId') || ''; } catch (e) { return ''; } })(),
   pass: (function () { try { return localStorage.getItem('ghPass') || ''; } catch (e) { return ''; } })(),
   on: (function () { try { return localStorage.getItem('ghOn') === '1'; } catch (e) { return false; } })(),
   ready: false, pushTimer: null, _status: 'off', _msg: '',
+  _restored: false,     // 首次云端校验/恢复是否已完成（失败保持 false，自动上传封锁）
+  _pushing: null,       // 进行中的推送 promise（并发互斥，防重复建 Gist）
+  _skipNextPush: false, // 从云端恢复导入后跳过一次冗余回传
 };
 const GH_API = 'https://api.github.com';
 const SYNC_FILE = 'guanka-sync.json';
+
+function localHasData() {
+  return !!(state.myCards.length || state.memberships.length || state.vouchers.length || state.knowledge.length);
+}
 
 function syncStatus(kind, msg) {
   SYNC._status = kind; SYNC._msg = msg || '';
 }
 function syncStatusText() {
   const map = {
-    ok: ['已同步', 'var(--ok, #27ae60)'], syncing: ['同步中…', 'var(--primary, #3498db)'],
-    err: ['同步异常', '#c0392b'], off: ['未开启', 'var(--text-3, #999)'],
+    ok: ['已同步', 'var(--green)'], syncing: ['同步中…', 'var(--blue)'],
+    err: ['同步异常', 'var(--red)'], off: ['未开启', 'var(--text-3)'],
   };
   const m = map[SYNC._status] || map.off;
   return { text: m[0] + (SYNC._msg && SYNC._status === 'err' ? '：' + SYNC._msg : ''), color: m[1] };
@@ -730,6 +743,18 @@ async function syncDeriveKey(pass, salt) {
   const base = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
+// 分块转 base64：0x8000 一档。逐字符 += 拼接在 MB 级备份上明显偏慢
+function bytesToB64(buf) {
+  const CH = 0x8000; let s = '';
+  for (let i = 0; i < buf.length; i += CH) s += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
+  return btoa(s);
+}
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf;
+}
 async function syncEncrypt(obj, pass) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -738,14 +763,10 @@ async function syncEncrypt(obj, pass) {
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
   const buf = new Uint8Array(16 + 12 + ct.byteLength);
   buf.set(salt, 0); buf.set(iv, 16); buf.set(new Uint8Array(ct), 28);
-  let bin = '';
-  for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
-  return btoa(bin);
+  return bytesToB64(buf);
 }
 async function syncDecrypt(b64s, pass) {
-  const bin = atob(b64s);
-  const buf = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  const buf = b64ToBytes(b64s);
   const salt = buf.slice(0, 16), iv = buf.slice(16, 28), ct = buf.slice(28);
   const key = await syncDeriveKey(pass, salt);
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
@@ -774,28 +795,51 @@ async function syncInit() {
 // 拉取当前全量备份（guanka-backup v2 JSON）后加密推送
 async function syncPush() {
   if (!SYNC.on || !SYNC.token) return;
-  try {
-    syncStatus('syncing');
-    const pass = SYNC.pass || (() => { throw new Error('请先设置同步密码'); })();
-    const res = await fetch('/api/mycards/export');
-    if (!res.ok) throw new Error('备份导出失败 ' + res.status);
-    const backup = await res.json();
-    const blob = await syncEncrypt(backup, pass);
-    if (!SYNC.gistId) {
-      const created = await ghReq('/gists', {
-        method: 'POST',
-        body: JSON.stringify({ public: false, description: '管卡 · 同步备份', files: { [SYNC_FILE]: { content: blob } } }),
-      });
-      SYNC.gistId = created.id;
-      try { localStorage.setItem('ghGistId', SYNC.gistId); } catch (e) {}
-    } else {
-      await ghReq('/gists/' + SYNC.gistId, {
-        method: 'PATCH',
-        body: JSON.stringify({ files: { [SYNC_FILE]: { content: blob } } }),
-      });
+  if (SYNC._pushing) return SYNC._pushing; // 并发去重：防抖上传与手动上传重叠时复用同一次推送
+  SYNC._pushing = (async () => {
+    try {
+      syncStatus('syncing');
+      const pass = SYNC.pass || (() => { throw new Error('请先设置同步密码'); })();
+      const res = await fetch('/api/mycards/export');
+      if (res.status === 401 || res.status === 403) { showLogin('登录已过期，请重新登录后再同步'); throw new Error('未授权，无法导出备份'); }
+      if (!res.ok) throw new Error('备份导出失败 ' + res.status);
+      const backup = await res.json();
+      const blob = await syncEncrypt(backup, pass);
+      // Gist 可能已在 GitHub 侧被删除：PATCH 404 时清掉本地 gistId 自动重建（重试一次）
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!SYNC.gistId) {
+          const created = await ghReq('/gists', {
+            method: 'POST',
+            body: JSON.stringify({ public: false, description: '管卡 · 同步备份', files: { [SYNC_FILE]: { content: blob } } }),
+          });
+          SYNC.gistId = created.id;
+          try { localStorage.setItem('ghGistId', SYNC.gistId); } catch (e) {}
+          break;
+        }
+        try {
+          await ghReq('/gists/' + SYNC.gistId, {
+            method: 'PATCH',
+            body: JSON.stringify({ files: { [SYNC_FILE]: { content: blob } } }),
+          });
+          break;
+        } catch (e) {
+          if (attempt === 0 && /404/.test(e.message)) {
+            SYNC.gistId = '';
+            try { localStorage.removeItem('ghGistId'); } catch (e2) {}
+            continue;
+          }
+          throw e;
+        }
+      }
+      syncStatus('ok');
+    } catch (e) {
+      syncStatus('err', e.message);
+      throw e;
+    } finally {
+      SYNC._pushing = null;
     }
-    syncStatus('ok');
-  } catch (e) { syncStatus('err', e.message); throw e; }
+  })();
+  return SYNC._pushing;
 }
 // 从 Gist 拉取并解密，返回备份对象；未开启 / 无 Gist 时返回 null
 async function syncPull() {
@@ -803,32 +847,51 @@ async function syncPull() {
   if (!SYNC.ready) { await syncInit(); }
   if (!SYNC.gistId) return null;
   const pass = SYNC.pass || (() => { throw new Error('请先设置同步密码'); })();
-  const g = await ghReq('/gists/' + SYNC.gistId);
+  let g;
+  try {
+    g = await ghReq('/gists/' + SYNC.gistId);
+  } catch (e) {
+    if (/404/.test(e.message)) {
+      SYNC.gistId = '';
+      try { localStorage.removeItem('ghGistId'); } catch (e2) {}
+      throw new Error('云端 Gist 已不存在，下次上传将自动重建');
+    }
+    throw e;
+  }
   const f = g.files && g.files[SYNC_FILE];
   if (!f || !f.content) return null;
-  return syncDecrypt(f.content, pass);
+  try {
+    return await syncDecrypt(f.content, pass);
+  } catch (e) {
+    throw new Error('解密失败：同步密码与备份加密时不一致？');
+  }
 }
 // 数据变更后防抖 800ms 自动上传（与 benefit-tracker 相同节奏）
 function scheduleSyncPush() {
-  if (!SYNC.on || !SYNC.token) return;
+  // 首次云端校验未完成前禁止自动上传（防「本地空数据覆盖云端备份」）
+  if (!SYNC.on || !SYNC.token || !SYNC._restored) return;
+  if (SYNC._skipNextPush) { SYNC._skipNextPush = false; return; }
   clearTimeout(SYNC.pushTimer);
   SYNC.pushTimer = setTimeout(() => { syncPush().catch(() => {}); }, 800);
 }
-// 页面加载时若已开启同步且本地无数据，自动从云端恢复
+// 页面加载时若已开启同步：先做一次云端校验/合并（幂等），之后才放行自动上传
 async function initCloudSync() {
-  if (!SYNC.on || !SYNC.token) { syncStatus('off'); return; }
+  if (!SYNC.on || !SYNC.token) { syncStatus('off'); SYNC._restored = true; return; }
   try {
     const remote = await syncPull();
-    if (remote && Array.isArray(remote.myCards)) {
-      const hasLocal = state.myCards.length || state.memberships.length || state.vouchers.length || state.knowledge.length;
-      if (!hasLocal) {
-        const r = await api('/api/mycards/import', { method: 'POST', body: { data: remote, mode: 'merge' } });
-        toast('已从云端同步（' + r.importedCards + ' 张持卡）');
-        await loadAll();
-      }
-    }
-    syncStatus('ok');
-  } catch (e) { syncStatus('err', e.message); }
+    if (!remote || !Array.isArray(remote.myCards)) { SYNC._restored = true; return; } // 云端为空 → 可安全上传
+    // 云端有备份：merge 导入（幂等，重复项全跳过），本地与云端取并集
+    const r = await api('/api/mycards/import', { method: 'POST', body: { data: remote, mode: 'merge' } });
+    const n = (r.importedCards || 0) + (r.consumptions || 0) + (r.benefitRecords || 0) + (r.bills || 0) +
+      (r.memberships || 0) + (r.vouchers || 0) + (r.voucherBrands || 0) + (r.knowledge || 0);
+    if (!n) SYNC._skipNextPush = true; // 完全幂等 → 无需回传
+    else toast('已从云端合并 ' + r.importedCards + ' 张持卡等数据');
+    SYNC._restored = true;
+    await loadAll(); // 有合并时 loadAll 会带着并集自动上传
+  } catch (e) {
+    // 保持 _restored=false：自动上传维持封锁（典型：未登录 401，登录成功后会重试）
+    syncStatus('err', e.message);
+  }
 }
 
 // ---------- 云同步设置弹窗 ----------
@@ -859,10 +922,17 @@ function openCloudSyncModal() {
     try { localStorage.setItem('ghToken', token); localStorage.setItem('ghPass', pass); localStorage.setItem('ghOn', newOn ? '1' : '0'); } catch (e) {}
     if (newOn) {
       toast('正在连接 GitHub…');
-      try { await syncInit(); await syncPush(); toast('已推送到 Gist'); }
-      catch (e) { toast('同步失败：' + e.message, 'error'); }
+      SYNC._restored = false; // 重新校验
+      try { await syncInit(); await syncPush(); SYNC._restored = true; toast('已推送到 Gist'); }
+      catch (e) {
+        // 开启失败即回滚，避免停留在「on 但未校验」的封锁状态
+        SYNC.on = false;
+        try { localStorage.setItem('ghOn', '0'); } catch (e2) {}
+        syncStatus('err', e.message);
+        toast('同步失败：' + e.message, 'error');
+      }
     } else {
-      SYNC.ready = false; syncStatus('off');
+      SYNC.ready = false; SYNC._restored = false; syncStatus('off');
     }
     closeModal(); openCloudSyncModal(); // 重绘按钮/状态
   });
@@ -872,9 +942,14 @@ function openCloudSyncModal() {
     if (passEl.value) SYNC.pass = passEl.value;
     if (!SYNC.on) return toast('请先开启同步', 'error');
     if (!SYNC.ready) { try { await syncInit(); } catch (e) { return toast(e.message, 'error'); } }
+    // 首次校验未完成 + 本地无数据：直接上传会把云端备份覆盖为空，先补做校验
+    if (!SYNC._restored) {
+      await initCloudSync();
+      if (!SYNC._restored) return toast('云端校验未完成，请检查网络/Token 后重试', 'error');
+    }
     toast('正在上传…');
     try { await syncPush(); toast('已推送到 Gist'); closeModal(); openCloudSyncModal(); }
-    catch (e) { toast('上传失败：' + e.message, 'error'); syncStatus('err', e.message); }
+    catch (e) { toast('上传失败：' + e.message, 'error'); }
   });
   $('#btn-sync-restore').addEventListener('click', async () => {
     const tokenEl = $('#gh-token-input'), passEl = $('#gh-pass-input');
@@ -886,9 +961,13 @@ function openCloudSyncModal() {
     try {
       const remote = await syncPull();
       if (!remote || !Array.isArray(remote.myCards)) throw new Error('云端还没有备份数据');
-      const mode = (state.myCards.length || state.memberships.length || state.vouchers.length || state.knowledge.length) ? null : 'merge';
-      const r = await api('/api/mycards/import', { method: 'POST', body: { data: remote, mode: mode || (confirm('本地已有数据，采用「合并」方式恢复（保留现有数据，追加云端备份）？\n\n点「取消」中止。') ? 'merge' : null) } });
-      if (!r) return;
+      // 本地无数据：直接 merge 导入；本地有数据：用户显式确认后才导入
+      let mode = 'merge';
+      if (localHasData()) {
+        if (!confirm('本地已有数据。\n\n确定采用「合并」方式恢复？（保留现有数据，追加云端备份中的新卡与记录）\n\n点「取消」中止。')) return;
+      }
+      const r = await api('/api/mycards/import', { method: 'POST', body: { data: remote, mode } });
+      SYNC._skipNextPush = true; // 恢复即云→本地方向，无需立刻回传
       const parts = ['恢复 ' + r.importedCards + ' 张持卡'];
       if (r.consumptions != null) parts.push('消费 ' + r.consumptions + ' 条 · 权益 ' + (r.benefitRecords || 0) + ' 条 · 账单 ' + (r.bills || 0) + ' 条');
       toast(parts.join('，'));
