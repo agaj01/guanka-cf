@@ -172,6 +172,8 @@ async function boot() {
   bindNav();
   await checkAuth();
   await loadAll();
+  // 登录态建立后：若已开启 gist 云同步，本地无数据时自动从云端恢复
+  initCloudSync().catch(() => {});
 }
 
 async function loadAll() {
@@ -193,6 +195,8 @@ async function loadAll() {
   state.billGroups = mycardsResp.billGroups || [];
   state.cards = cards;
   state.bills = bills || [];
+  // 数据已刷新：若开启了 gist 云同步，防抖后自动上传最新备份
+  scheduleSyncPush();
   // 扩展资产：加载失败不阻塞主页面（老备份/异常时优雅降级为空列表）
   try {
     [state.memberships, state.vouchers, state.voucherBrands, state.knowledge, state.assetStats] = await Promise.all([
@@ -273,6 +277,7 @@ function renderMyCards() {
     '<button class="btn" id="btn-mycards-import">批量导入</button>' +
     '<button class="btn" id="btn-backup-export">备份</button>' +
     '<button class="btn" id="btn-backup-import">恢复</button>' +
+    '<button class="btn" id="btn-cloud-sync">云同步' + (SYNC.on ? '<span id="sync-dot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + (SYNC._status === 'err' ? '#c0392b' : '#27ae60') + ';margin-left:5px;vertical-align:middle"></span>' : '') + '</button>' +
     '<select id="filter-select" class="filter-select">' +
     option('all', '全部卡片', true) + option('repay', '本月需还款', true) + option('fee', '年费临近(30天)', true) +
     option('met', '年费已达标', true) + option('unpaid', '有未还账单', true) + option('benefit', '有剩余权益', true) +
@@ -494,6 +499,8 @@ function bindPageEvents() {
   if (backupExpBtn) backupExpBtn.addEventListener('click', exportBackup);
   const backupImpBtn = $('#btn-backup-import', app);
   if (backupImpBtn) backupImpBtn.addEventListener('click', openBackupImportModal);
+  const cloudSyncBtn = $('#btn-cloud-sync', app);
+  if (cloudSyncBtn) cloudSyncBtn.addEventListener('click', openCloudSyncModal);
   const myImportBtn = $('#btn-mycards-import', app);
   if (myImportBtn) myImportBtn.addEventListener('click', openMyCardsImportModal);
   const bgBtn = $('#btn-billgroups', app);
@@ -689,6 +696,205 @@ function openBackupImportModal() {
       await loadAll();
     } catch (e) { toast(e.message, 'error'); }
     btn.disabled = false;
+  });
+}
+
+// ---------- 云同步（GitHub Gist）—— 改造自 benefit-tracker 同款方案 ----------
+// 数据经 AES-GCM 端到端加密后存入你的「私密 Gist」；两端填相同
+// GitHub Token + 同步密码即可共享（Gist ID 首次上传自动生成）。
+// 纯前端直连 GitHub API，Docker 版 / Workers 版行为完全一致，服务端零改动。
+const SYNC = {
+  token: (function () { try { return localStorage.getItem('ghToken') || ''; } catch (e) { return ''; } })(),
+  gistId: (function () { try { return localStorage.getItem('ghGistId') || ''; } catch (e) { return ''; } })(),
+  pass: (function () { try { return localStorage.getItem('ghPass') || ''; } catch (e) { return ''; } })(),
+  on: (function () { try { return localStorage.getItem('ghOn') === '1'; } catch (e) { return false; } })(),
+  ready: false, pushTimer: null, _status: 'off', _msg: '',
+};
+const GH_API = 'https://api.github.com';
+const SYNC_FILE = 'guanka-sync.json';
+
+function syncStatus(kind, msg) {
+  SYNC._status = kind; SYNC._msg = msg || '';
+}
+function syncStatusText() {
+  const map = {
+    ok: ['已同步', 'var(--ok, #27ae60)'], syncing: ['同步中…', 'var(--primary, #3498db)'],
+    err: ['同步异常', '#c0392b'], off: ['未开启', 'var(--text-3, #999)'],
+  };
+  const m = map[SYNC._status] || map.off;
+  return { text: m[0] + (SYNC._msg && SYNC._status === 'err' ? '：' + SYNC._msg : ''), color: m[1] };
+}
+
+async function syncDeriveKey(pass, salt) {
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function syncEncrypt(obj, pass) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await syncDeriveKey(pass, salt);
+  const data = new TextEncoder().encode(JSON.stringify(obj));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
+  const buf = new Uint8Array(16 + 12 + ct.byteLength);
+  buf.set(salt, 0); buf.set(iv, 16); buf.set(new Uint8Array(ct), 28);
+  let bin = '';
+  for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+  return btoa(bin);
+}
+async function syncDecrypt(b64s, pass) {
+  const bin = atob(b64s);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  const salt = buf.slice(0, 16), iv = buf.slice(16, 28), ct = buf.slice(28);
+  const key = await syncDeriveKey(pass, salt);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+async function ghReq(path, opts) {
+  const headers = {
+    'Authorization': 'Bearer ' + SYNC.token,
+    'Accept': 'application/vnd.github+json',
+    'Content-Type': 'application/json',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  const r = await fetch(GH_API + path, Object.assign({ headers }, opts || {}));
+  if (!r.ok) {
+    let detail = '';
+    try { const j = await r.json(); detail = j.message || ''; } catch (e) {}
+    throw new Error('GitHub 返回 ' + r.status + (detail ? '：' + detail : ''));
+  }
+  if (r.status === 204) return null;
+  return r.json();
+}
+async function syncInit() {
+  if (!SYNC.token) throw new Error('未填写 GitHub Token');
+  SYNC.ready = true;
+}
+// 拉取当前全量备份（guanka-backup v2 JSON）后加密推送
+async function syncPush() {
+  if (!SYNC.on || !SYNC.token) return;
+  try {
+    syncStatus('syncing');
+    const pass = SYNC.pass || (() => { throw new Error('请先设置同步密码'); })();
+    const res = await fetch('/api/mycards/export');
+    if (!res.ok) throw new Error('备份导出失败 ' + res.status);
+    const backup = await res.json();
+    const blob = await syncEncrypt(backup, pass);
+    if (!SYNC.gistId) {
+      const created = await ghReq('/gists', {
+        method: 'POST',
+        body: JSON.stringify({ public: false, description: '管卡 · 同步备份', files: { [SYNC_FILE]: { content: blob } } }),
+      });
+      SYNC.gistId = created.id;
+      try { localStorage.setItem('ghGistId', SYNC.gistId); } catch (e) {}
+    } else {
+      await ghReq('/gists/' + SYNC.gistId, {
+        method: 'PATCH',
+        body: JSON.stringify({ files: { [SYNC_FILE]: { content: blob } } }),
+      });
+    }
+    syncStatus('ok');
+  } catch (e) { syncStatus('err', e.message); throw e; }
+}
+// 从 Gist 拉取并解密，返回备份对象；未开启 / 无 Gist 时返回 null
+async function syncPull() {
+  if (!SYNC.on || !SYNC.token) return null;
+  if (!SYNC.ready) { await syncInit(); }
+  if (!SYNC.gistId) return null;
+  const pass = SYNC.pass || (() => { throw new Error('请先设置同步密码'); })();
+  const g = await ghReq('/gists/' + SYNC.gistId);
+  const f = g.files && g.files[SYNC_FILE];
+  if (!f || !f.content) return null;
+  return syncDecrypt(f.content, pass);
+}
+// 数据变更后防抖 800ms 自动上传（与 benefit-tracker 相同节奏）
+function scheduleSyncPush() {
+  if (!SYNC.on || !SYNC.token) return;
+  clearTimeout(SYNC.pushTimer);
+  SYNC.pushTimer = setTimeout(() => { syncPush().catch(() => {}); }, 800);
+}
+// 页面加载时若已开启同步且本地无数据，自动从云端恢复
+async function initCloudSync() {
+  if (!SYNC.on || !SYNC.token) { syncStatus('off'); return; }
+  try {
+    const remote = await syncPull();
+    if (remote && Array.isArray(remote.myCards)) {
+      const hasLocal = state.myCards.length || state.memberships.length || state.vouchers.length || state.knowledge.length;
+      if (!hasLocal) {
+        const r = await api('/api/mycards/import', { method: 'POST', body: { data: remote, mode: 'merge' } });
+        toast('已从云端同步（' + r.importedCards + ' 张持卡）');
+        await loadAll();
+      }
+    }
+    syncStatus('ok');
+  } catch (e) { syncStatus('err', e.message); }
+}
+
+// ---------- 云同步设置弹窗 ----------
+function openCloudSyncModal() {
+  const st = syncStatusText();
+  openModal('<div class="modal-title">云端同步（GitHub Gist）</div>',
+    '<div style="font-size:12px;color:var(--text-2);margin-bottom:10px;line-height:1.7">' +
+    '数据经 <b>AES-GCM 端到端加密</b>后存入你的<b>私密 Gist</b>，Token 泄露也不会暴露明文（已加密）。' +
+    '两端填<b>相同 Token 与同步密码</b>即可共享同一份备份。开启后数据变更会自动上传。</div>' +
+    '<div class="field" style="margin-bottom:10px"><label>GitHub Token（需 gist 权限）</label>' +
+    '<input id="gh-token-input" type="password" placeholder="ghp_xxx 或 github_pat_xxx" value="' + esc(SYNC.token) + '" style="width:100%"></div>' +
+    '<div class="field" style="margin-bottom:10px"><label>同步密码（用于加密，两端需一致）</label>' +
+    '<input id="gh-pass-input" type="password" placeholder="设置一个同步密码" value="' + esc(SYNC.pass) + '" style="width:100%"></div>' +
+    '<div style="font-size:12px;color:var(--text-2);margin-bottom:8px">Gist ID：<code style="font-size:11px">' + (esc(SYNC.gistId) || '（首次上传后自动生成）') + '</code></div>' +
+    '<div style="font-size:12px;color:var(--text-2)">状态：<span id="sync-stat" style="font-weight:600;color:' + st.color + '">' + esc(st.text) + '</span></div>',
+    '<button class="btn" data-close>关闭</button>' +
+    '<button class="btn" id="btn-sync-restore">从云端恢复</button>' +
+    '<button class="btn" id="btn-sync-now">立即上传</button>' +
+    '<button class="btn primary" id="btn-sync-toggle">' + (SYNC.on ? '关闭同步' : '开启同步') + '</button>');
+
+  $('#btn-sync-toggle').addEventListener('click', async () => {
+    const token = $('#gh-token-input').value.trim();
+    const pass = $('#gh-pass-input').value;
+    if (!token) return toast('请先填写 GitHub Token', 'error');
+    if (!pass) return toast('请设置同步密码（弱密码等于任何人拿到 Gist 都能解密）', 'error');
+    const newOn = !SYNC.on;
+    SYNC.token = token; SYNC.pass = pass; SYNC.on = newOn;
+    try { localStorage.setItem('ghToken', token); localStorage.setItem('ghPass', pass); localStorage.setItem('ghOn', newOn ? '1' : '0'); } catch (e) {}
+    if (newOn) {
+      toast('正在连接 GitHub…');
+      try { await syncInit(); await syncPush(); toast('已推送到 Gist'); }
+      catch (e) { toast('同步失败：' + e.message, 'error'); }
+    } else {
+      SYNC.ready = false; syncStatus('off');
+    }
+    closeModal(); openCloudSyncModal(); // 重绘按钮/状态
+  });
+  $('#btn-sync-now').addEventListener('click', async () => {
+    const tokenEl = $('#gh-token-input'), passEl = $('#gh-pass-input');
+    if (tokenEl.value.trim()) SYNC.token = tokenEl.value.trim();
+    if (passEl.value) SYNC.pass = passEl.value;
+    if (!SYNC.on) return toast('请先开启同步', 'error');
+    if (!SYNC.ready) { try { await syncInit(); } catch (e) { return toast(e.message, 'error'); } }
+    toast('正在上传…');
+    try { await syncPush(); toast('已推送到 Gist'); closeModal(); openCloudSyncModal(); }
+    catch (e) { toast('上传失败：' + e.message, 'error'); syncStatus('err', e.message); }
+  });
+  $('#btn-sync-restore').addEventListener('click', async () => {
+    const tokenEl = $('#gh-token-input'), passEl = $('#gh-pass-input');
+    if (tokenEl.value.trim()) SYNC.token = tokenEl.value.trim();
+    if (passEl.value) SYNC.pass = passEl.value;
+    if (!SYNC.on) return toast('请先开启同步', 'error');
+    if (!SYNC.ready) { try { await syncInit(); } catch (e) { return toast(e.message, 'error'); } }
+    toast('正在从云端拉取…');
+    try {
+      const remote = await syncPull();
+      if (!remote || !Array.isArray(remote.myCards)) throw new Error('云端还没有备份数据');
+      const mode = (state.myCards.length || state.memberships.length || state.vouchers.length || state.knowledge.length) ? null : 'merge';
+      const r = await api('/api/mycards/import', { method: 'POST', body: { data: remote, mode: mode || (confirm('本地已有数据，采用「合并」方式恢复（保留现有数据，追加云端备份）？\n\n点「取消」中止。') ? 'merge' : null) } });
+      if (!r) return;
+      const parts = ['恢复 ' + r.importedCards + ' 张持卡'];
+      if (r.consumptions != null) parts.push('消费 ' + r.consumptions + ' 条 · 权益 ' + (r.benefitRecords || 0) + ' 条 · 账单 ' + (r.bills || 0) + ' 条');
+      toast(parts.join('，'));
+      closeModal();
+      await loadAll();
+    } catch (e) { toast('恢复失败：' + e.message, 'error'); }
   });
 }
 
