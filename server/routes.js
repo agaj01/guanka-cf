@@ -598,7 +598,11 @@ async function handle(method, pathname, url, body, req) {
 
   // ---- 基础 ----
   if (pathname === '/api/health') return json({ ok: true, version: '1.1.3', time: now.toISOString() });
-  if (pathname === '/api/meta') return json({ channels: CHANNELS, categories: CATEGORIES, waiverTypes: WAIVER_TYPES, resetCycles: RESET_CYCLES, benefitTypes: BENEFIT_TYPES, csvHeader: CSV_HEADER, mycardsCsvHeader: MYCARD_CSV_HEADER, maxImportCards: MAX_IMPORT_CARDS, assets: getAssetMeta() });
+  // 资产元数据同时挂在顶层与 assets 子对象：早期版本曾只挂 assets.xxx，
+  // 前端（会员储值/卡票/知识库页）按顶层 state.meta.memCatLabels 等读取，
+  // 结果下拉渲染成空壳——「会员储值页面分类不可选」的根因。保留 assets
+  // 子对象以兼容可能存在的旧调用方，两处引用同一常量对象，零额外开销。
+  if (pathname === '/api/meta') return json(Object.assign({ channels: CHANNELS, categories: CATEGORIES, waiverTypes: WAIVER_TYPES, resetCycles: RESET_CYCLES, benefitTypes: BENEFIT_TYPES, csvHeader: CSV_HEADER, mycardsCsvHeader: MYCARD_CSV_HEADER, maxImportCards: MAX_IMPORT_CARDS, assets: getAssetMeta() }, getAssetMeta()));
   if (pathname === '/api/shutdown') {
     // 需要鉴权（由 index.js 的 auth.guard 保证）；此处再加一层同源校验，
     // 阻断「隐藏表单 POST 到 /api/shutdown」这类 CSRF（GET/跨站来源一律拒绝）

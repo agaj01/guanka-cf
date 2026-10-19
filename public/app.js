@@ -2766,10 +2766,20 @@ const MEM_CAT_BADGE = {
   video: 'badge-purple', ecard: 'badge-gold', dining: 'badge-orange', fitness: 'badge-green',
   beauty: 'badge-red', travel: 'badge-blue', course: 'badge-blue', tool: 'badge-default', subscription: 'badge-default', other: 'badge-default',
 };
+// 分类元数据兜底：/api/meta 的 assets 元数据曾在 assets 子对象下（顶层缺失），
+// 或扩展资产接口失败导致 meta 不全时，页面下拉仍可用（与 KG_TYPE_LABELS_FALLBACK 同思路）
+const MEM_CAT_LABELS_FALLBACK = {
+  video: '视频娱乐', ecard: '储值卡', dining: '餐饮美食', fitness: '运动健身',
+  beauty: '丽人美肤', travel: '出行旅游', course: '在线课程', tool: '效率工具',
+  subscription: '软件订阅', other: '其他',
+};
+function memCatLabels() {
+  return state.meta.memCatLabels || (state.meta.assets && state.meta.assets.memCatLabels) || MEM_CAT_LABELS_FALLBACK;
+}
 
 function renderMemberships() {
   const list = state.memberships || [];
-  const meta = state.meta.memCatLabels || {};
+  const meta = memCatLabels();
   let html =
     '<div class="page-title">会员 / 储值卡</div>' +
     '<div class="page-desc">视频会员、健身年卡、储值卡等订阅资产管理，金额与次数两种模式</div>' +
@@ -2804,7 +2814,7 @@ function renderMemberships() {
 }
 
 function memRowHtml(m) {
-  const catLabel = (state.meta.memCatLabels || {})[m.category] || '其他';
+  const catLabel = memCatLabels()[m.category] || '其他';
   let remainHtml;
   if (m.mode === 'amount') {
     remainHtml = '<div class="card-sub">余额 <b style="color:var(--gold-deep)">' + fmtMoney(m.balance) + '</b></div>';
@@ -2827,7 +2837,7 @@ function memRowHtml(m) {
 
 function memFormHtml(m) {
   m = m || {};
-  const cats = state.meta.memCatLabels || {};
+  const cats = memCatLabels();
   return '<div class="form-grid">' +
     field('名称 <span style="color:var(--red)">*</span>', '<input id="m-name" value="' + esc(m.name || '') + '" placeholder="如 腾讯视频VIP">') +
     field('分类', '<select id="m-category">' + Object.keys(cats).map((k) => '<option value="' + k + '"' + ((m.category || 'other') === k ? ' selected' : '') + '>' + esc(cats[k]) + '</option>').join('') + '</select>') +
@@ -2932,7 +2942,7 @@ function openMemDetail(id) {
     '<td><span class="badge ' + (t.kind === 'topup' ? 'badge-green' : 'badge-default') + '">' + (t.kind === 'topup' ? '充值' : '消费') + '</span></td>' +
     '<td class="amount">' + fmtMoney(t.amount) + '</td>' +
     '<td>' + esc(t.note || '') + '</td></tr>').join('');
-  const catLabel = (state.meta.memCatLabels || {})[m.category] || '其他';
+  const catLabel = memCatLabels()[m.category] || '其他';
   $('#drawer', root).innerHTML =
     '<div class="drawer-header"><div class="drawer-title">' + esc(m.name) +
     '<div class="drawer-sub">' + esc(catLabel) + ' · ' + (m.mode === 'amount' ? '金额型' : '次数型') + '</div></div>' +
