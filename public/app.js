@@ -2997,10 +2997,26 @@ const KG_TYPE_LABELS_FALLBACK = {
   file: '网盘/文件资料', online_doc: '在线文档/表格', consultation: '在线咨询服务',
   membership: '会员/社群/资讯平台', course: '学习课程', tool: '工具/软件订阅', other: '其他',
 };
+// 知识库元数据兜底：meta 资产字段曾嵌在 assets 子对象（顶层缺失）或接口失败时，
+// 页面下拉仍可用（与 memCatLabels() 同思路，三级 fallback）
+const KG_CAT_LABELS_FALLBACK = {
+  course: '课程', column: '专栏', community: '社群', subscription: '软件订阅',
+  book: '电子书', database: '数据库', resource: '资料库', other: '其他',
+};
+const KG_CYCLE_LABELS_FALLBACK = { monthly: '月付', yearly: '年付', lifetime: '终身' };
+function kgCatLabels() {
+  return state.meta.kgCatLabels || (state.meta.assets && state.meta.assets.kgCatLabels) || KG_CAT_LABELS_FALLBACK;
+}
+function kgTypeLabels() {
+  return state.meta.kgTypeLabels || (state.meta.assets && state.meta.assets.kgTypeLabels) || KG_TYPE_LABELS_FALLBACK;
+}
+function kgCycleLabels() {
+  return state.meta.kgCycleLabels || (state.meta.assets && state.meta.assets.kgCycleLabels) || KG_CYCLE_LABELS_FALLBACK;
+}
 
 function renderKnowledge() {
   const list = state.knowledge || [];
-  const meta = state.meta.kgCatLabels || {};
+  const meta = kgCatLabels();
   const totalSpend = list.reduce((s, k) => s + (Number(k.price) || 0), 0);
   const active = list.filter((k) => k.lifetime || !k.expiry || k.expiry >= today()).length;
   let html =
@@ -3037,8 +3053,8 @@ function renderKnowledge() {
 }
 
 function kgRowHtml(k) {
-  const cycleLabel = (state.meta.kgCycleLabels || { monthly: '月付', yearly: '年付', lifetime: '终身' })[k.cycle] || k.cycle;
-  const typeLabel = (state.meta.kgTypeLabels || KG_TYPE_LABELS_FALLBACK)[k.resourceType] || k.resourceType;
+  const cycleLabel = kgCycleLabels()[k.cycle] || k.cycle;
+  const typeLabel = kgTypeLabels()[k.resourceType] || k.resourceType;
   const activeBadge = k.lifetime ? '<span class="badge badge-gold">终身</span>'
     : (k.expiry && k.expiry < today() ? '<span class="badge badge-red">已到期</span>' : '<span class="badge badge-green">在期</span>');
   const progress = Number(k.progress) || 0;
@@ -3055,9 +3071,9 @@ function kgRowHtml(k) {
 
 function kgFormHtml(k) {
   k = k || {};
-  const types = state.meta.kgTypeLabels || KG_TYPE_LABELS_FALLBACK;
-  const cats = state.meta.kgCatLabels || {};
-  const cycles = state.meta.kgCycleLabels || { monthly: '月付', yearly: '年付', lifetime: '终身' };
+  const types = kgTypeLabels();
+  const cats = kgCatLabels();
+  const cycles = kgCycleLabels();
   return '<div class="form-grid">' +
     field('资源名称 <span style="color:var(--red)">*</span>', '<input id="k-title" value="' + esc(k.title || '') + '" placeholder="如 极客时间年度会员">') +
     field('平台', '<input id="k-platform" value="' + esc(k.platform || '') + '" placeholder="如 极客时间">') +
@@ -3114,9 +3130,9 @@ function openKgDetail(id) {
   const useLog = (k.useLog || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
   const hist = (k.history || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
   const HIST_LABEL = { recharge: '充值', renew: '续费', use: '消费', refund: '退款', gift: '赠送' };
-  const cycleLabel = (state.meta.kgCycleLabels || { monthly: '月付', yearly: '年付', lifetime: '终身' })[k.cycle] || k.cycle;
-  const types = state.meta.kgTypeLabels || KG_TYPE_LABELS_FALLBACK;
-  const cats = state.meta.kgCatLabels || {};
+  const cycleLabel = kgCycleLabels()[k.cycle] || k.cycle;
+  const types = kgTypeLabels();
+  const cats = kgCatLabels();
   const useRows = useLog.map((u) => '<tr><td>' + esc(u.date) + '</td><td>' + esc(u.note || '') + '</td></tr>').join('');
   const histRows = hist.map((h) => '<tr><td>' + esc(h.date) + '</td>' +
     '<td><span class="badge badge-default">' + esc(HIST_LABEL[h.type] || h.type) + '</span></td>' +

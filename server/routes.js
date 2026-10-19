@@ -9,6 +9,12 @@ const ics = require('./ics');
 const D = require('./dates');
 const A = require('./assets');
 
+// 版本号单一事实来源：根 package.json（启动加载一次）。
+// 页脚「管卡 vX.Y.Z」来自 /api/health，此前版本号在 health 与 package.json
+// 双写，发版只改一边就会脱节（页脚显示旧版）。
+let APP_VERSION = '1.0.0';
+try { APP_VERSION = require('../package.json').version || APP_VERSION; } catch (e) { /* Workers 构建产物由 vendor.js 注入字面量 */ }
+
 // 账单流水（月账单 + 是否已还）
 function getBills() { return store.readArray('bills'); }
 
@@ -597,7 +603,7 @@ async function handle(method, pathname, url, body, req) {
   const now = new Date();
 
   // ---- 基础 ----
-  if (pathname === '/api/health') return json({ ok: true, version: '1.1.3', time: now.toISOString() });
+  if (pathname === '/api/health') return json({ ok: true, version: APP_VERSION, time: now.toISOString() });
   // 资产元数据同时挂在顶层与 assets 子对象：早期版本曾只挂 assets.xxx，
   // 前端（会员储值/卡票/知识库页）按顶层 state.meta.memCatLabels 等读取，
   // 结果下拉渲染成空壳——「会员储值页面分类不可选」的根因。保留 assets

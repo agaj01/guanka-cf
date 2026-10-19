@@ -32,6 +32,13 @@ function patch(src, rel) {
   out = out.replace(/process\.env\.([A-Z_][A-Z0-9_]*)/g, '(ENV && ENV.$1)');
   // routes.js 里唯一的动态 require：require('./auth').sameOrigin(req)
   out = out.replace(/require\('\.\/auth'\)\.sameOrigin\(req\)/g, "require('./auth-shim').sameOrigin(req)");
+  // 版本号注入：Workers 构建产物里没有 ../package.json 可读（bundled 后路径失效），
+  // 把 try/catch 兜底段整体替换为根 package.json 的 version 字面量（单一事实来源）
+  const rootPkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', '..', 'package.json'), 'utf8'));
+  out = out.replace(
+    /let APP_VERSION = '[\d.]+';\s*\ntry \{ APP_VERSION = require\('\.\.\/package\.json'\)\.version \|\| APP_VERSION; \} catch \(e\) \{ \/\* Workers 构建产物由 vendor\.js 注入字面量 \*\/ \}/,
+    "const APP_VERSION = '" + String(rootPkg.version || '1.0.0') + "'; // vendor 构建期自 package.json 注入"
+  );
 
   if (out !== orig) console.log('  patched:', rel);
   return out;
