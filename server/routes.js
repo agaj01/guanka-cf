@@ -467,15 +467,15 @@ function benefitRecords(idx, myCardId, benefitIdx, bid) {
   return out;
 }
 
-function benefitUsed(mc, idx, now, index, bid) {
+function benefitUsed(mc, benefitIdx, now, indexes, bid) {
   now = now || new Date();
-  const b = (mc.benefits || [])[idx];
+  const b = (mc.benefits || [])[benefitIdx];
   if (!b) return { used: 0, total: 0, exhausted: false, cycle: '自然月', missing: true };
   const start = U.cycleStart(b.resetCycle, mc.feeMonth, mc.feeDay, now);
   const startStr = U.toDateStr(start);
   const useBid = bid !== undefined ? bid : b.id;
-  const index2 = index || buildIndexes();
-  const recs = benefitRecords(index2, mc.id, idx, useBid).filter((r) => r.date >= startStr);
+  const idx = indexes || buildIndexes(); // 第四参：预建索引（computeMyCard 复用）；未传时兜底构建
+  const recs = benefitRecords(idx, mc.id, benefitIdx, useBid).filter((r) => r.date >= startStr);
   const used = recs.filter((r) => r.type === 'usage').length
     + recs.filter((r) => r.type === 'count').reduce((s, r) => s + (Number(r.count) || 0), 0);
   const total = Number(b.total) || 0;
@@ -493,12 +493,12 @@ function benefitUsed(mc, idx, now, index, bid) {
   };
 }
 
-function benefitHistory(mc, idx, bid, index) {
-  const b = (mc.benefits || [])[idx];
+function benefitHistory(mc, benefitIdx, bid, indexes) {
+  const b = (mc.benefits || [])[benefitIdx];
   if (!b) return [];
   // 第四参可选：未传时兜底构建索引（保证旧式三参调用不报错），统一走 bid/idx 分桶索引查询
-  const idx2 = index || buildIndexes();
-  const recs = benefitRecords(idx2, mc.id, idx, bid !== undefined ? bid : b.id);
+  const idx = indexes || buildIndexes();
+  const recs = benefitRecords(idx, mc.id, benefitIdx, bid !== undefined ? bid : b.id);
   const groups = new Map();
   for (const r of recs) {
     const key = U.cycleKeyOf(b.resetCycle, mc.feeMonth, mc.feeDay, r.date);

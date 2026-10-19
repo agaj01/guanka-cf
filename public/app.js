@@ -365,8 +365,7 @@ function renderMyCards() {
 
 // isFilter：filter 与 sort 下拉框取值有交集（fee/repay），选中态必须各比各的，否则交叉误标
 function option(value, label, isFilter) {
-  const sel = isFilter ? state.filter === value : state.sort === value;
-  return '<option value="' + value + '"' + (sel ? ' selected' : '') + '>' + label + '</option>';
+  return option2(value, label, isFilter ? state.filter : state.sort);
 }
 
 function applyFilterSort(list) {
@@ -909,7 +908,7 @@ function scheduleSyncPush() {
   if (!SYNC.on || !SYNC.token || !SYNC._restored) return;
   if (SYNC._skipNextPush) { SYNC._skipNextPush = false; return; }
   clearTimeout(SYNC.pushTimer);
-  SYNC.pushTimer = setTimeout(() => { syncPush().catch(() => {}); }, 800);
+  SYNC.pushTimer = setTimeout(() => { syncPush().catch((e) => console.warn('[sync] 自动上传失败:', e.message)); }, 800);
 }
 // 页面加载时若已开启同步：先做一次云端校验/合并（幂等），之后才放行自动上传
 async function initCloudSync() {
@@ -2502,6 +2501,7 @@ function voucherRowHtml(v) {
     '</div>';
 }
 
+// 通用 option 渲染（cur 为当前选中值）；option() 是它在 filter/sort 场景的薄包装
 function option2(value, label, cur) {
   return '<option value="' + value + '"' + (cur === value ? ' selected' : '') + '>' + label + '</option>';
 }
@@ -2784,8 +2784,12 @@ const MEM_CAT_LABELS_FALLBACK = {
   beauty: '丽人美肤', travel: '出行旅游', course: '在线课程', tool: '效率工具',
   subscription: '软件订阅', other: '其他',
 };
+// 三级回退：meta 顶层 → meta.assets.*（旧版服务端）→ 内置常量（离线/异常兜底）
+function metaLabels(key, fallback) {
+  return state.meta[key] || (state.meta.assets && state.meta.assets[key]) || fallback;
+}
 function memCatLabels() {
-  return state.meta.memCatLabels || (state.meta.assets && state.meta.assets.memCatLabels) || MEM_CAT_LABELS_FALLBACK;
+  return metaLabels('memCatLabels', MEM_CAT_LABELS_FALLBACK);
 }
 
 function renderMemberships() {
@@ -3016,13 +3020,13 @@ const KG_CAT_LABELS_FALLBACK = {
 };
 const KG_CYCLE_LABELS_FALLBACK = { monthly: '月付', yearly: '年付', lifetime: '终身' };
 function kgCatLabels() {
-  return state.meta.kgCatLabels || (state.meta.assets && state.meta.assets.kgCatLabels) || KG_CAT_LABELS_FALLBACK;
+  return metaLabels('kgCatLabels', KG_CAT_LABELS_FALLBACK);
 }
 function kgTypeLabels() {
-  return state.meta.kgTypeLabels || (state.meta.assets && state.meta.assets.kgTypeLabels) || KG_TYPE_LABELS_FALLBACK;
+  return metaLabels('kgTypeLabels', KG_TYPE_LABELS_FALLBACK);
 }
 function kgCycleLabels() {
-  return state.meta.kgCycleLabels || (state.meta.assets && state.meta.assets.kgCycleLabels) || KG_CYCLE_LABELS_FALLBACK;
+  return metaLabels('kgCycleLabels', KG_CYCLE_LABELS_FALLBACK);
 }
 
 function renderKnowledge() {
