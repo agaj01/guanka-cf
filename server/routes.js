@@ -1283,6 +1283,15 @@ async function handle(method, pathname, url, body, req) {
       last4: b.last4 != null ? String(b.last4).replace(/\D/g, '').slice(0, 4) : cur.last4,
       monthlySpendTarget: b.monthlySpendTarget != null ? nonNeg(b.monthlySpendTarget, 0) : cur.monthlySpendTarget,
       billGroupId: b.billGroupId != null ? String(b.billGroupId) : (cur.billGroupId || ''),
+      // 年费/免年费快照可编辑（此前 PUT 静默丢弃这些字段：卡种快照建卡时若
+      // 与实际不符——如「消费达标免年费」的卡被快照成积分抵扣——用户无法修正，
+      // 记账后刷免达标永远不联动）
+      annualFee: b.annualFee != null ? nonNeg(b.annualFee, 0) : cur.annualFee,
+      waiverType: b.waiverType != null
+        ? (WAIVER_TYPES.includes(b.waiverType) ? b.waiverType : cur.waiverType)
+        : cur.waiverType,
+      waiverCondition: b.waiverCondition != null ? String(b.waiverCondition).trim() : cur.waiverCondition,
+      waiverPolicy: b.waiverPolicy != null ? String(b.waiverPolicy).trim() : cur.waiverPolicy,
     };
     // 合并账单一致性（策略③）：无论是改本卡还款日、还是把卡挪进/挪出某个组，
     // 都要以「改完之后」的状态重新校验，避免组内出现两个还款节奏

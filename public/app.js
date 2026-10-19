@@ -1945,6 +1945,11 @@ function renderPickForm(selected) {
 
 function myCardFormHtml(c, m) {
   const bens = m ? (m.benefits || []) : (c.benefits || []).map((name) => ({ name, total: 1, resetCycle: '自然年' }));
+  const waiverTypes = state.meta.waiverTypes || ['消费刷免', '笔数刷免', '积分抵扣', '资产存免', '刚性', '免年费'];
+  // 编辑时年费/免年费取持卡快照；新建时取卡种默认值
+  const curFee = m ? m.annualFee : (c.annualFee || 0);
+  const curWaiverType = m ? m.waiverType : (c.waiverType || waiverTypes[0]);
+  const curWaiverCondition = m ? (m.waiverCondition || '') : (c.waiverCondition || '');
   return (
     '<div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--gold-deep)">' + esc(c.name) + ' · ' + esc(c.bank) + '</div>' +
     '<div class="form-grid">' +
@@ -1952,6 +1957,9 @@ function myCardFormHtml(c, m) {
     field('卡号后四位（选填）', '<input id="f-last4" maxlength="4" placeholder="如 6688" value="' + esc(m ? m.last4 : '') + '">') +
     field('授信额度', '<input id="f-credit" type="number" min="0" step="1000" value="' + (m ? m.creditLimit : (c.startCredit || 0)) + '">') +
     field('月消费目标（选填）', '<input id="f-target" type="number" min="0" step="1000" value="' + (m ? m.monthlySpendTarget : 0) + '">') +
+    field('年费（元）', '<input id="f-annualfee" type="number" min="0" step="0.01" value="' + esc(curFee) + '" title="以此处为准（建卡时的卡种快照可能不准，可自行修正）">') +
+    field('免年费类型', '<select id="f-waivertype">' + waiverTypes.map((t) => '<option' + (curWaiverType === t ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>') +
+    field('刷免条件', '<input id="f-waivercondition" value="' + esc(curWaiverCondition) + '" placeholder="金额如 6万/60000、笔数如 10、积分如 10000" title="消费刷免/笔数刷免/积分抵扣/资产存免的达标门槛。改完后按卡年自动累计消费/笔数并联动达标状态">') +
     field('账单日（1-31）', '<input id="f-billing" type="number" min="1" max="31" value="' + (m ? m.billingDay : 1) + '">') +
     field('还款方式', '<select id="f-repaymode"><option value="fixed"' + (!m || m.repayMode !== 'afterBill' ? ' selected' : '') + '>每月固定日</option><option value="afterBill"' + (m && m.repayMode === 'afterBill' ? ' selected' : '') + '>账单日后 N 天</option></select>') +
     field('还款值', '<input id="f-repay" type="number" min="1" max="365" value="' + (m ? (m.repayValue != null ? m.repayValue : m.repaymentDay) : 20) + '" title="固定日=第几日；账单日后N天=天数">') +
@@ -2061,6 +2069,9 @@ async function saveMyCard(selected, editing) {
     last4: $('#f-last4', form).value.trim(),
     creditLimit: $('#f-credit', form).value,
     monthlySpendTarget: $('#f-target', form).value,
+    annualFee: $('#f-annualfee', form) ? $('#f-annualfee', form).value : undefined,
+    waiverType: $('#f-waivertype', form) ? $('#f-waivertype', form).value : undefined,
+    waiverCondition: $('#f-waivercondition', form) ? $('#f-waivercondition', form).value.trim() : undefined,
     billingDay: $('#f-billing', form).value,
     repaymentDay: $('#f-repay', form).value,
     repayMode: ($('#f-repaymode', form) && $('#f-repaymode', form).value) || 'fixed',
