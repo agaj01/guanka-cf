@@ -1616,13 +1616,35 @@ function billsHtml(m) {
 
 async function openBillModal(m) {
   const p = m.payment || {};
+  const w = m.waiver || {};
+  // 刷免进度提示 + 账单→消费联动开关：
+  // 账单金额与消费明细是两条数据线，此前用户在账单里记账后期望年费达标联动，
+  // 但刷免进度只统计「记一笔」的消费记录，永远不动。这里给出显式联动入口。
+  let waiverHintHtml = '';
+  let linkageHtml = '';
+  if (w.kind === '消费刷免' || w.kind === '笔数刷免') {
+    const progressTxt = w.unit === '元'
+      ? fmtMoney(w.progress) + ' / ' + fmtMoney(w.target)
+      : fmtInt(w.progress) + ' / ' + fmtInt(w.target) + ' 笔';
+    waiverHintHtml = '<div class="bill-hint" style="margin:0 0 8px">年费刷免进度（卡年）：' + progressTxt +
+      (w.met ? '，已达标' : '') + '</div>';
+    if (w.kind === '消费刷免') {
+      // 本卡年已有消费记录时默认不勾选，避免账单重复累计（消费已算过一遍）
+      const hasYearSpend = m.yearSpend > 0;
+      linkageHtml = '<label class="switch-row" style="margin:4px 0 0"><input type="checkbox" id="b-count-spend"' + (hasYearSpend ? '' : ' checked') + '> ' +
+        '<span style="font-size:12px;color:var(--text-2)">账单金额计入刷免进度（勾选后将按账单金额记入消费记录）</span></label>';
+    } else {
+      linkageHtml = '<div style="font-size:12px;color:var(--text-3)">笔数刷免请在「记一笔」或「补录笔数」中累计笔数，账单金额不计入</div>';
+    }
+  }
   openModal('<div class="modal-title">新增账单 — ' + esc(m.alias || m.name) + '</div>',
+    waiverHintHtml +
     '<div class="form-grid">' +
     field('出账月份（YYYY-MM）', '<input id="b-month" value="' + esc(p.billMonth || '') + '" placeholder="2026-10">') +
     field('账单金额', '<input id="b-amount" type="number" min="0" step="0.01" value="0">') +
     field('到期还款日', '<input id="b-due" type="date" value="' + esc(p.dueDate || '') + '">') +
     field('是否已还', '<select id="b-paid"><option>未还</option><option>已还</option></select>') +
-    '</div>',
+    '</div>' + linkageHtml,
     '<button class="btn" data-close>取消</button><button class="btn primary" id="b-save">保存</button>');
   $('#b-save').addEventListener('click', (e) => submitLock(e.currentTarget, async () => {
     try {
@@ -1634,6 +1656,7 @@ async function openBillModal(m) {
           amount: $('#b-amount').value,
           dueDate: $('#b-due').value,
           paid: $('#b-paid').value,
+          countAsSpend: !!($('#b-count-spend') && $('#b-count-spend').checked),
         },
       });
       toast('账单已添加');

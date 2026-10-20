@@ -936,6 +936,8 @@ async function handle(method, pathname, url, body, req) {
         note: String(r.note || '').trim(),
         createdAt: U.parseDateStr(String(r.createdAt || '').slice(0, 10)) ? String(r.createdAt) : nowDate.toISOString(),
       });
+      // 账单联动镜像记录保留来源标记（丢了会导致后续账单改额无法定位同步对象）
+      if (typeof r.fromBill === 'string' && r.fromBill) safeCons[safeCons.length - 1].fromBill = r.fromBill;
     }
 
     // —— 权益使用记录（merge 幂等：id 已存在的记录跳过）——
@@ -995,6 +997,8 @@ async function handle(method, pathname, url, body, req) {
         note: String(r.note || '').trim(),
         createdAt: U.parseDateStr(String(r.createdAt || '').slice(0, 10)) ? String(r.createdAt) : nowDate.toISOString(),
       });
+      // 联动标记随备份迁移（PUT 改额时依据它同步镜像消费）
+      if (r.countAsSpend) safeBills[safeBills.length - 1].countAsSpend = true;
     }
 
     // —— 扩展资产（v2 备份新增，旧 v1 备份没有这些字段则按空数组处理）——
@@ -1543,6 +1547,38 @@ async function handle(method, pathname, url, body, req) {
   }
 
   // ---- 账单流水（月账单 + 是否已还）----
+  // 账单→消费联动：勾选「计入刷免进度」时把账单金额镜像为一条消费记录（fromBill 标记）。
+  // 账单金额（月度应还）与消费明细本是两条数据线，默认不互通；此联动仅由用户显式触发，
+  // 并随账单的增/删/改额同步增删改，避免刷免进度与账单脱节或重复累计。
+  function billMonthLastDay(month) {
+    const m = /^(\d{4})-(\d{2})$/.exec(String(month || ''));
+    return m ? U.toDateStr(new Date(+m[1], +m[2], 0)) : U.todayStr();
+  }
+
+  function syncBillConsumption(bill, want, amount, now) {
+    const recs = getConsumptions();
+    const i = recs.findIndex((r) => r.fromBill === bill.id);
+    if (!want || !(Number(amount) > 0)) {
+      // 金额清零/取消联动/金额为 0：移除镜像记录（amount 型消费要求 > 0）
+      if (i >= 0) { recs.splice(i, 1); store.write('consumptions', recs); }
+      return;
+    }
+    if (i >= 0) {
+      recs[i].amount = Math.round(Number(amount) * 100) / 100;
+    } else {
+      recs.push({
+        id: U.uid(), myCardId: bill.myCardId, type: 'amount',
+        date: billMonthLastDay(bill.month),
+        amount: Math.round(Number(amount) * 100) / 100,
+        channel: '其他', category: '其他',
+        note: '账单 ' + bill.month + ' 金额联动',
+        fromBill: bill.id,
+        createdAt: (now || new Date()).toISOString(),
+      });
+    }
+    store.write('consumptions', recs);
+  }
+
   if (pathname === '/api/bills' && method === 'GET') {
     const q = url.searchParams;
     let list = getBills();
@@ -1577,8 +1613,12 @@ async function handle(method, pathname, url, body, req) {
       note: String(b.note || '').trim(),
       createdAt: now.toISOString(),
     };
+    // 联动标记落库：PUT 改额时依据它重建/同步镜像消费（金额改 0 时镜像会被移除，
+    // 之后仅凭 fromBill 记录无法区分「从未联动」和「联动后归零」）
+    if (b.countAsSpend) rec.countAsSpend = true;
     bills.push(rec);
     store.write('bills', bills);
+    if (b.countAsSpend) syncBillConsumption(rec, true, rec.amount, now);
     return json(rec, 201);
   }
   const billMatch = pathname.match(/^\/api\/bills\/([^/]+)$/);
@@ -1607,13 +1647,26 @@ async function handle(method, pathname, url, body, req) {
       paidDate,
       note: b.note != null ? String(b.note).trim() : cur.note,
     };
+    // 联动状态三态：显式传 countAsSpend 可开/关联动；不传则沿用既有状态（含「联动后金额归零」）
+    if (b.countAsSpend != null) {
+      if (b.countAsSpend) bills[i].countAsSpend = true;
+      else delete bills[i].countAsSpend;
+    }
     store.write('bills', bills);
+    // 已勾选联动的账单：改额时镜像消费同步改额/重建（金额归零则移除，消费金额要求 > 0）
+    if (bills[i].countAsSpend) {
+      syncBillConsumption(bills[i], true, bills[i].amount, now);
+    } else if (getConsumptions().some((r) => r.fromBill === bills[i].id)) {
+      syncBillConsumption(bills[i], false, 0, now);
+    }
     return json(bills[i]);
   }
   if (billMatch && method === 'DELETE') {
     const bills = getBills();
     if (!bills.some((b) => b.id === billMatch[1])) return err('账单不存在', 404);
+    const del = bills.find((b) => b.id === billMatch[1]);
     store.write('bills', bills.filter((b) => b.id !== billMatch[1]));
+    if (del) syncBillConsumption(del, false, 0, now);
     return json({ ok: true });
   }
   const billGenMatch = pathname.match(/^\/api\/mycards\/([^/]+)\/bills\/generate$/);
