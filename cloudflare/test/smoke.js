@@ -130,7 +130,23 @@ async function main() {
     const src = fs.readFileSync(ROOT + '/vendored/' + f, 'utf8');
     ok(!/new Date\(\s*\)/.test(src), f + ' 无裸 new Date() 残留');
     ok(!/process\.env\./.test(src), f + ' 无裸 process.env 残留');
+    // Date.now() 与 NOW()（+8h 锚）混用曾致提醒节流 gap 恒 -480min、cron 永久 skip（P0）——
+    // vendor.js 统一替换为 NOW().getTime()，此处防回归
+    ok(!/Date\.now\(\)/.test(src), f + ' 无裸 Date.now() 残留（与 NOW 时钟统一）');
   }
+
+  console.log('== 5. 提醒节流时钟一致性（P0 防回归）==');
+  // 两轮节流：第 1 轮写 lastCheckAt，第 2 轮立即判应 skip；把 lastCheckAt 回拨到 interval 之外应放行。
+  // 旧 bug 下写入超前真实时间 8h，第 2 轮 gap 为负同样 skip——区分度在「回拨放行」与 gap 符号。
+  const throttleSrc = fs.readFileSync(ROOT + '/vendored/routes.js', 'utf8');
+  ok(/NOW\(\)\.getTime\(\) - new Date\(cfg\.lastCheckAt\)/.test(throttleSrc), '节流判断与写入同用 NOW 时钟');
+  // 直接驱动内部节流语义（/api/notify/check 是 force=true 手动路径，本就绕过节流）
+  const out1 = await routes.runNotifyChecks(false); // force=false：lastCheckAt 为空 → 执行
+  ok(out1.skipped === false, '第 1 轮 cron 执行（lastCheckAt 为空不节流）');
+  const notifyCfg = JSON.parse(JSON.stringify(store.readObject('notify', {})));
+  ok(notifyCfg.lastCheckAt, 'lastCheckAt 已写入');
+  const out2 = await routes.runNotifyChecks(false); // force=false：间隔内 → skip
+  ok(out2.skipped === true, '第 2 轮 cron 被 interval 节流');
 
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);

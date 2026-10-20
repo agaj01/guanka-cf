@@ -1141,7 +1141,7 @@ function notifyModalHtml(cfg) {
       [['sendkey', 'SendKey', 'password', 'SCTxxxxx']]) +
     ch('bark', 'Bark', 'iOS 推送：Bark App 中复制 deviceKey（自建服务可改服务器地址）',
       [['deviceKey', 'deviceKey', 'password', ''], ['server', '服务器地址', 'text', 'https://api.day.app'], ['level', '推送级别', 'text', 'active'], ['group', '分组', 'text', '管卡']]) +
-    ch('wecom', '企业微信机器人', '微信群机器人：群设置 → 群机器人 → 添加 → 复制 webhook 的 key 参数',
+    ch('wecom', '企业微信消息推送', '企业微信「消息推送」（原群机器人）：群聊右上角 →消息推送→ 添加/查看 → 复制 Webhook 地址的 key 参数',
       [['webhookKey', 'Webhook Key', 'password', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
     '<div class="notify-rules"><h4>提醒规则</h4><div class="form-grid">' +
     field('年费提前提醒天数（逗号分隔）', '<input id="n-feeDays" value="' + esc((cfg.rules.feeDays || []).join(',')) + '" placeholder="30,7,1">') +

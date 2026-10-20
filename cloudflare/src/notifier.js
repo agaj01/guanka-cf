@@ -124,13 +124,13 @@ async function sendWxpusher(env, cfg, title, content) {
   return verdict(r, 1000, 'wxpusher', 'msg');
 }
 
-function sctUrl(cfg) {
-  const base = 'https://sctapi.ftqq.com';
+function sctUrl(env, cfg) {
+  const base = endpoint(env, 'NOTIFY_SCT_URL', 'https://sctapi.ftqq.com');
   return base.replace(/\/$/, '') + '/' + encodeURIComponent(String(cfg.sendkey || '').trim()) + '.send';
 }
 async function sendServerChan(env, cfg, title, content) {
   if (!cfg.sendkey) return { ok: false, error: '缺少 SendKey' };
-  const r = await postForm(sctUrl(cfg), { title: title.slice(0, 100), desp: content });
+  const r = await postForm(sctUrl(env, cfg), { title: title.slice(0, 100), desp: content });
   if (!r.ok) return r;
   return verdict(r, 0, 'Server酱', 'message');
 }
@@ -148,7 +148,7 @@ async function sendBark(env, cfg, title, content) {
   return verdict(r, 200, 'Bark', 'message');
 }
 
-// ---------------- 企业微信群机器人 (wecom)（语义与 server/notifier.js 逐字节一致）----------------
+// ---------------- 企业微信消息推送 (wecom)（原「群机器人」，v4.1.41 起更名，协议不变；语义与 server/notifier.js 一致）----------------
 // POST https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<KEY>
 // {msgtype:'markdown', markdown:{content}}；成功判定 {errcode:0, errmsg:'ok'}
 const WECOM_CONTENT_MAX_BYTES = 4096; // 企业微信 markdown content 长度上限（UTF-8 字节）

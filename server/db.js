@@ -99,7 +99,10 @@ class Store {
    * 收益（解除事件循环阻塞）与代价（引入并发写复杂度）在当前个人工具规模下不成正比。
    */
   write(name, data) {
-    this.cache.set(name, data);
+    // 顺序约束：先落盘成功、再更新内存缓存。若反过来，磁盘写失败（满/权限/卷故障）
+    // 时缓存已含新数据而磁盘仍是旧值——进程继续运行期间所有读返回从未持久化的数据，
+    // 且后续任一次成功写会把这份「未确认」状态整体落盘（用户已收到 500 却被静默持久化）。
+    // 单线程同步模型下两语句间无让出点，反转顺序无并发代价。
     const file = this._file(name);
     const tmp = file + '.tmp';
     const payload = JSON.stringify(data, null, PRETTY_JSON ? 2 : 0);
@@ -113,6 +116,7 @@ class Store {
       fs.writeFileSync(tmp, payload);
     }
     fs.renameSync(tmp, file);
+    this.cache.set(name, data);
   }
 }
 

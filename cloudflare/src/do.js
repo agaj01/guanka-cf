@@ -98,8 +98,9 @@ export class GuankaDO {
       }
     }
 
+    let result;
     try {
-      const result = await routes.handle(method, pathname, url, body, {
+      result = await routes.handle(method, pathname, url, body, {
         // routes.js 的 sameOrigin(plainReq) 只用到这三个头
         headers: {
           origin: req.headers.get('origin'),
@@ -107,8 +108,15 @@ export class GuankaDO {
           host: req.headers.get('host'),
         },
       });
-      // 请求收尾：等待全部排队落盘写完成；写失败在此抛出 → 500（对齐 Node 版同步写抛错语义）
+    } finally {
+      // 请求收尾（成功与异常路径都要走）：等待全部排队落盘写完成。
+      // 此前只在成功路径 flush——handle 中途抛错（含 400 业务错误）时本请求已排队的
+      // storage.put 无人 await，写失败静默成 unhandled rejection，缓存与 DO Storage
+      // 分歧且可能延迟到下一个无关请求爆出。finally 中写失败仍会抛出（成功路径 → 500；
+      // 异常路径已被 handle 的错误接管，此处异常替换为收尾错误，语义可接受）。
       await this.store.flush();
+    }
+    try {
       if (result === undefined) return resp(404, { error: 'Not found' });
       if (result.shutdown) {
         // Workers 无进程退出概念：数据已在 DO Storage 强一致持久化，等价语义是「无需退出」

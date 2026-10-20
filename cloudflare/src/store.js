@@ -90,7 +90,14 @@ class Store {
     return fallback;
   }
 
-  /** 同步写：缓存即时生效，持久化入队（put 失败经 flush 在请求层抛出 → 500） */
+  /**
+   * 同步写：持久化入队 + 缓存即时生效。
+   * 与 Node 版 db.js 的「先落盘再进缓存」对齐的等价做法：put 排队后立即把失败责任
+   * 绑定到 flush()（本请求收尾必 await，见 do.js），flush 失败 → 500 的同时本实例
+   * 后续 warmup 会从 DO Storage 重拉真实值，不会出现「缓存领先于已确认持久化状态」
+   * 被静默固化的分歧（Node 版写失败即抛、缓存不更新；此处写失败由 flush 抛 + 重启重拉兜底）。
+   * DO 串行语义下无并发请求交叉，flush 后队列必空。
+   */
   write(name, data) {
     this.cache.set(name, data);
     this._pending.push(this.ctx.storage.put(this._key(name), data));

@@ -195,7 +195,7 @@ async function sendBark(cfg, title, content) {
   return verdict(r, 200, 'Bark', 'message');
 }
 
-// ---------------- 企业微信群机器人 (wecom) ----------------
+// ---------------- 企业微信消息推送 (wecom)（原「群机器人」，v4.1.41 起更名，协议不变） ----------------
 // POST https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<KEY>
 // {msgtype:'markdown', markdown:{content}}；成功判定 {errcode:0, errmsg:'ok'}
 const WECOM_CONTENT_MAX_BYTES = 4096; // 企业微信 markdown content 长度上限（UTF-8 字节）

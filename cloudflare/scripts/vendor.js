@@ -29,6 +29,9 @@ function patch(src, rel) {
   const orig = src;
 
   out = out.replace(/new Date\(\s*\)/g, 'NOW()');
+  // Date.now() 同样是「真实 UTC 时刻」：与 NOW()（+8h 偏移锚）混用会产生时钟错位——
+  // 曾致提醒节流 gap 恒 ≈ -480 分钟，cron 首轮检查后永久 skip（P0）。统一替换为 NOW().getTime()。
+  out = out.replace(/Date\.now\(\)/g, 'NOW().getTime()');
   out = out.replace(/process\.env\.([A-Z_][A-Z0-9_]*)/g, '(ENV && ENV.$1)');
   // routes.js 里唯一的动态 require：require('./auth').sameOrigin(req)
   out = out.replace(/require\('\.\/auth'\)\.sameOrigin\(req\)/g, "require('./auth-shim').sameOrigin(req)");
