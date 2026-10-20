@@ -1565,6 +1565,9 @@ async function handle(method, pathname, url, body, req) {
     }
     if (i >= 0) {
       recs[i].amount = Math.round(Number(amount) * 100) / 100;
+      // 账单改月时镜像日期同步（月末归属变了，卡年窗口/月度统计都要跟着走）
+      const nd = billMonthLastDay(bill.month);
+      if (recs[i].date !== nd) recs[i].date = nd;
     } else {
       recs.push({
         id: U.uid(), myCardId: bill.myCardId, type: 'amount',
@@ -1628,6 +1631,16 @@ async function handle(method, pathname, url, body, req) {
     if (i < 0) return err('账单不存在', 404);
     const b = body || {};
     const cur = bills[i];
+    // 月份可改：显式传入时校验格式与同卡唯一性（改月会影响镜像消费的归属卡年窗口）
+    let month = cur.month;
+    if (b.month != null) {
+      const nm = String(b.month).trim();
+      if (!/^\d{4}-\d{2}$/.test(nm)) return err('出账月份格式应为 YYYY-MM');
+      if (nm !== cur.month && bills.some((x) => x.myCardId === cur.myCardId && x.month === nm)) {
+        return err('该卡该月份账单已存在');
+      }
+      month = nm;
+    }
     const amount = b.amount != null ? Number(b.amount) : cur.amount;
     if (!isFinite(amount) || amount < 0) return err('账单金额必须不小于 0');
     const paid = b.paid == null ? cur.paid : (b.paid === '已还' ? '已还' : '未还');
@@ -1640,6 +1653,7 @@ async function handle(method, pathname, url, body, req) {
       : (paid === '已还' ? (U.parseDateStr(cur.paidDate) ? cur.paidDate : U.todayStr()) : '');
     bills[i] = {
       ...cur,
+      month,
       amount: Math.round(amount * 100) / 100,
       dueDate,
       paid,

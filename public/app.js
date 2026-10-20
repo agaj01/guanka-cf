@@ -1610,11 +1610,13 @@ function billsHtml(m) {
       '<td><span class="badge ' + (b.paid === '已还' ? 'badge-green' : 'badge-red') + '">' + esc(b.paid) + '</span>' +
       (b.paidDate ? '<div class="slider-date">' + esc(b.paidDate) + '</div>' : '') + '</td>' +
       '<td><button class="btn small" data-act="bill-toggle">' + (b.paid === '已还' ? '标记未还' : '标记已还') + '</button> ' +
+      '<button class="btn small" data-act="bill-edit">编辑</button> ' +
       '<button class="btn small danger" data-act="bill-del">删除</button></td></tr>').join('') +
     '</tbody></table>';
 }
 
-async function openBillModal(m) {
+async function openBillModal(m, bill) {
+  const editing = !!bill;
   const p = m.payment || {};
   const w = m.waiver || {};
   // 刷免进度提示 + 账单→消费联动开关：
@@ -1629,37 +1631,43 @@ async function openBillModal(m) {
     waiverHintHtml = '<div class="bill-hint" style="margin:0 0 8px">年费刷免进度（卡年）：' + progressTxt +
       (w.met ? '，已达标' : '') + '</div>';
     if (w.kind === '消费刷免') {
-      // 本卡年已有消费记录时默认不勾选，避免账单重复累计（消费已算过一遍）
-      const hasYearSpend = m.yearSpend > 0;
-      linkageHtml = '<label class="switch-row" style="margin:4px 0 0"><input type="checkbox" id="b-count-spend"' + (hasYearSpend ? '' : ' checked') + '> ' +
+      // 卡年口径防双计：w.progress 与刷免进度同源（cardYearRecordsOf，自上个年费日起），
+      // 比自然年的 yearSpend 更准——feeMonth 非年初的卡，年初消费属上一卡年，不该抑制联动
+      // 编辑模式：显示该账单的当前联动状态（而非按"卡年已有消费"推导）
+      const hasYearSpend = editing ? !!bill.countAsSpend : (w.progress || 0) > 0;
+      linkageHtml = '<label class="switch-row" style="margin:4px 0 0"><input type="checkbox" id="b-count-spend"' + (hasYearSpend ? ' checked' : '') + '> ' +
         '<span style="font-size:12px;color:var(--text-2)">账单金额计入刷免进度（勾选后将按账单金额记入消费记录）</span></label>';
     } else {
       linkageHtml = '<div style="font-size:12px;color:var(--text-3)">笔数刷免请在「记一笔」或「补录笔数」中累计笔数，账单金额不计入</div>';
     }
   }
-  openModal('<div class="modal-title">新增账单 — ' + esc(m.alias || m.name) + '</div>',
+  openModal('<div class="modal-title">' + (editing ? '编辑账单 — ' : '新增账单 — ') + esc(m.alias || m.name) + '</div>',
     waiverHintHtml +
     '<div class="form-grid">' +
-    field('出账月份（YYYY-MM）', '<input id="b-month" value="' + esc(p.billMonth || '') + '" placeholder="2026-10">') +
-    field('账单金额', '<input id="b-amount" type="number" min="0" step="0.01" value="0">') +
-    field('到期还款日', '<input id="b-due" type="date" value="' + esc(p.dueDate || '') + '">') +
-    field('是否已还', '<select id="b-paid"><option>未还</option><option>已还</option></select>') +
+    field('出账月份（YYYY-MM）', '<input id="b-month" value="' + esc(editing ? bill.month : (p.billMonth || '')) + '" placeholder="2026-10">') +
+    field('账单金额', '<input id="b-amount" type="number" min="0" step="0.01" value="' + esc(editing ? bill.amount : 0) + '">') +
+    field('到期还款日', '<input id="b-due" type="date" value="' + esc(editing ? (bill.dueDate || '') : (p.dueDate || '')) + '">') +
+    field('是否已还', '<select id="b-paid">' +
+      '<option' + (!editing || bill.paid !== '已还' ? ' selected' : '') + '>未还</option>' +
+      '<option' + (editing && bill.paid === '已还' ? ' selected' : '') + '>已还</option></select>') +
     '</div>' + linkageHtml,
     '<button class="btn" data-close>取消</button><button class="btn primary" id="b-save">保存</button>');
   $('#b-save').addEventListener('click', (e) => submitLock(e.currentTarget, async () => {
+    const payload = {
+      month: $('#b-month').value.trim(),
+      amount: $('#b-amount').value,
+      dueDate: $('#b-due').value,
+      paid: $('#b-paid').value,
+    };
+    if ($('#b-count-spend')) payload.countAsSpend = $('#b-count-spend').checked;
     try {
-      await api('/api/bills', {
-        method: 'POST',
-        body: {
-          myCardId: m.id,
-          month: $('#b-month').value.trim(),
-          amount: $('#b-amount').value,
-          dueDate: $('#b-due').value,
-          paid: $('#b-paid').value,
-          countAsSpend: !!($('#b-count-spend') && $('#b-count-spend').checked),
-        },
-      });
-      toast('账单已添加');
+      if (editing) {
+        await api('/api/bills/' + bill.id, { method: 'PUT', body: payload });
+        toast('账单已保存');
+      } else {
+        await api('/api/bills', { method: 'POST', body: Object.assign({ myCardId: m.id }, payload) });
+        toast('账单已添加');
+      }
       closeModal();
       await loadAll();
     } catch (e) { toast(e.message, 'error'); }
@@ -1756,6 +1764,13 @@ function bindDrawerEvents(m) {
         await api('/api/bills/' + id, { method: 'PUT', body: { paid: b.paid === '已还' ? '未还' : '已还' } });
         await loadAll();
       } catch (e) { toast(e.message, 'error'); }
+    });
+  });
+  $$('[data-act="bill-edit"]', drawer).forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.closest('tr').dataset.billId;
+      const b = (state.bills || []).find((x) => x.id === id);
+      if (b) openBillModal(m, b);
     });
   });
   $$('[data-act="bill-del"]', drawer).forEach((btn) => {
