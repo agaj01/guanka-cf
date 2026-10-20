@@ -1139,7 +1139,7 @@ function notifyModalHtml(cfg) {
       [['appToken', 'appToken', 'password', 'AT_xxx'], ['uids', 'UID（多个用逗号分隔）', 'text', 'UID_xxx'], ['topicIds', '主题ID（可选）', 'text', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
     ch('serverchan', 'Server酱³', '微信/多端推送：sct.ftqq.com 获取 SendKey（SCT/SCU 开头）',
       [['sendkey', 'SendKey', 'password', 'SCTxxxxx']]) +
-    ch('bark', 'Bark', 'iOS 推送：Bark App 中复制 deviceKey（自建服务可改服务器地址）',
+    ch('bark', 'Bark', 'iOS 推送：Bark App 中复制 deviceKey（推送经 GET 路径式 URL；自建服务可改服务器地址）',
       [['deviceKey', 'deviceKey', 'password', ''], ['server', '服务器地址', 'text', 'https://api.day.app'], ['level', '推送级别', 'text', 'active'], ['group', '分组', 'text', '管卡']]) +
     ch('wecom', '企业微信消息推送', '企业微信「消息推送」（原群机器人）：群聊右上角 →消息推送→ 添加/查看 → 复制 Webhook 地址的 key 参数',
       [['webhookKey', 'Webhook Key', 'password', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +

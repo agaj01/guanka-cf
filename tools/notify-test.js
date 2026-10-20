@@ -16,7 +16,7 @@ const server = http.createServer((req, res) => {
     if (req.url.includes('wxpusher')) res.end(JSON.stringify({ code: 1000, msg: '成功', success: true }));
     else if (req.url.includes('webhook/send')) res.end(JSON.stringify({ errcode: 0, errmsg: 'ok' }));
     else if (req.url.includes('.send')) res.end(JSON.stringify({ code: 0, message: '', data: {} }));
-    else if (req.url.includes('/push')) res.end(JSON.stringify({ code: 200, message: 'success' }));
+    else if (req.url.includes('/bark')) res.end(JSON.stringify({ code: 200, message: 'success' }));
     else res.end('{}');
   });
 });
@@ -56,7 +56,7 @@ async function main() {
 
   const wx = received.find((r) => r.url.includes('wxpusher'));
   const sct = received.find((r) => r.url.includes('.send'));
-  const bk = received.find((r) => r.url.includes('/push'));
+  const bk = received.find((r) => r.url.includes('/bark'));
   const wc = received.find((r) => r.url.includes('webhook/send'));
   if (wx) {
     const p = JSON.parse(wx.body);
@@ -72,10 +72,15 @@ async function main() {
     check('Server酱: 含 title/desp', sct.body.includes('title=') && sct.body.includes('desp='), sct.body.slice(0, 120));
   } else check('Server酱请求到达', false);
   if (bk) {
-    const p = JSON.parse(bk.body);
-    check('Bark: device_key 正确', p.device_key === 'bkkey', p.device_key);
-    check('Bark: title 正确', p.title.includes('年费提醒'), p.title);
-    check('Bark: level/group 透传', p.level === 'timeSensitive' && p.group === '管卡', p.level + '/' + p.group);
+    // GET 路径式：/{deviceKey}/{title}/{body}?level=&group=&isArchive=1
+    check('Bark: GET 方法', bk.method === 'GET', bk.method);
+    const q = bk.url.slice(bk.url.indexOf('?') + 1);
+    const pathDecoded = decodeURIComponent(bk.url.slice(0, bk.url.indexOf('?')).replace(/^\/bark\/?/, ''));
+    const segs = pathDecoded.split('/');
+    check('Bark: deviceKey 段正确', segs[0] === 'bkkey', segs[0]);
+    check('Bark: title 段正确', (segs[1] || '').includes('年费提醒'), segs[1]);
+    check('Bark: level/group 透传', q.includes('level=timeSensitive') && decodeURIComponent(q).includes('group=管卡'), q);
+    check('Bark: isArchive=1', q.includes('isArchive=1'), q);
   } else check('Bark 请求到达', false);
   if (wc) {
     check('wecom: key 在 URL 上', wc.url.includes('key=WC_test'), wc.url);

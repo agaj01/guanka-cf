@@ -96,6 +96,20 @@ async function postJson(url, body, headers) {
   return { ok: true, data, raw: text.slice(0, 200), contentType: res.headers.get('content-type') || '' };
 }
 
+/** GET（JSON 响应）：Bark 路径式推送用 */
+async function getJson(url) {
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch (e) { /* 非 JSON 响应 */ }
+  if (!res.ok) return { ok: false, error: 'HTTP ' + res.status + ' ' + text.slice(0, 160) };
+  return { ok: true, data, raw: text.slice(0, 200), contentType: res.headers.get('content-type') || '' };
+}
+
 async function postForm(url, form) {
   const res = await fetch(url, {
     method: 'POST',
@@ -135,15 +149,27 @@ async function sendServerChan(env, cfg, title, content) {
   return verdict(r, 0, 'Server酱', 'message');
 }
 
+// ---------------- Bark ----------------
+// GET {base}/{deviceKey}/{title}/{body}?level=&group=&isArchive=1（Bark 官方路径式 URL，
+// 与 Node 版 server/notifier.js 语义一致：逐段 encodeURIComponent + UTF-8 字节预算截断）
+const BARK_URL_BUDGET_BYTES = 2000;
+const BARK_TITLE_MAX_BYTES = 100;
+
 async function sendBark(env, cfg, title, content) {
   const override = env.NOTIFY_BARK_URL;
   if (!override) await assertSafeBarkServer(cfg.server);
   const base = (override || cfg.server || 'https://api.day.app').replace(/\/$/, '');
   if (!cfg.deviceKey) return { ok: false, error: '缺少 deviceKey' };
-  const r = await postJson(base + '/push', {
-    device_key: cfg.deviceKey, title: title.slice(0, 100), body: content,
-    level: cfg.level || 'active', group: cfg.group || '管卡', isArchive: 1,
-  });
+  const q = new URLSearchParams();
+  q.set('level', cfg.level || 'active');
+  if (cfg.group) q.set('group', cfg.group);
+  q.set('isArchive', '1');
+  const url = base
+    + '/' + encodeURIComponent(String(cfg.deviceKey || ''))
+    + '/' + encodeURIComponent(utf8Slice(title, BARK_TITLE_MAX_BYTES))
+    + '/' + encodeURIComponent(utf8Slice(content, BARK_URL_BUDGET_BYTES))
+    + '?' + q.toString();
+  const r = await getJson(url);
   if (!r.ok) return r;
   return verdict(r, 200, 'Bark', 'message');
 }
