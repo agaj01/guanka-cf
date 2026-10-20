@@ -1141,6 +1141,8 @@ function notifyModalHtml(cfg) {
       [['sendkey', 'SendKey', 'password', 'SCTxxxxx']]) +
     ch('bark', 'Bark', 'iOS 推送：Bark App 中复制 deviceKey（自建服务可改服务器地址）',
       [['deviceKey', 'deviceKey', 'password', ''], ['server', '服务器地址', 'text', 'https://api.day.app'], ['level', '推送级别', 'text', 'active'], ['group', '分组', 'text', '管卡']]) +
+    ch('wecom', '企业微信机器人', '微信群机器人：群设置 → 群机器人 → 添加 → 复制 webhook 的 key 参数',
+      [['webhookKey', 'Webhook Key', 'password', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
     '<div class="notify-rules"><h4>提醒规则</h4><div class="form-grid">' +
     field('年费提前提醒天数（逗号分隔）', '<input id="n-feeDays" value="' + esc((cfg.rules.feeDays || []).join(',')) + '" placeholder="30,7,1">') +
     field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +
@@ -1195,6 +1197,7 @@ async function openNotifyModal() {
       wxpusher: { enabled: $n('nc-wxpusher-enabled').checked, appToken: $n('nc-wxpusher-appToken').value.trim(), uids: $n('nc-wxpusher-uids').value.trim(), topicIds: $n('nc-wxpusher-topicIds').value.trim(), summaryPrefix: $n('nc-wxpusher-summaryPrefix').value.trim() },
       serverchan: { enabled: $n('nc-serverchan-enabled').checked, sendkey: $n('nc-serverchan-sendkey').value.trim() },
       bark: { enabled: $n('nc-bark-enabled').checked, deviceKey: $n('nc-bark-deviceKey').value.trim(), server: $n('nc-bark-server').value.trim(), level: $n('nc-bark-level').value.trim(), group: $n('nc-bark-group').value.trim() },
+      wecom: { enabled: $n('nc-wecom-enabled').checked, webhookKey: $n('nc-wecom-webhookKey').value.trim(), summaryPrefix: $n('nc-wecom-summaryPrefix').value.trim() },
     },
     rules: {
       feeDays: String($n('n-feeDays').value).split(/[,，\s]+/).map(Number).filter((x) => isFinite(x) && x >= 0),

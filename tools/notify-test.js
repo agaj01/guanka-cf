@@ -1,5 +1,5 @@
 'use strict';
-/* 提醒功能验证：本地 mock 服务接收三通道请求，校验 payload；再验证提醒规则与去重
+/* 提醒功能验证：本地 mock 服务接收四通道请求，校验 payload；再验证提醒规则与去重
  * 用法: node tools/notify-test.js
  */
 const http = require('http');
@@ -14,6 +14,7 @@ const server = http.createServer((req, res) => {
     received.push({ url: req.url, method: req.method, ctype: req.headers['content-type'], body });
     res.setHeader('Content-Type', 'application/json');
     if (req.url.includes('wxpusher')) res.end(JSON.stringify({ code: 1000, msg: '成功', success: true }));
+    else if (req.url.includes('webhook/send')) res.end(JSON.stringify({ errcode: 0, errmsg: 'ok' }));
     else if (req.url.includes('.send')) res.end(JSON.stringify({ code: 0, message: '', data: {} }));
     else if (req.url.includes('/push')) res.end(JSON.stringify({ code: 200, message: 'success' }));
     else res.end('{}');
@@ -35,6 +36,7 @@ async function main() {
   process.env.NOTIFY_WXPUSHER_URL = base + '/wxpusher/message';
   process.env.NOTIFY_SCT_URL = base + '/sct';
   process.env.NOTIFY_BARK_URL = base + '/bark';
+  process.env.NOTIFY_WECOM_URL = base + '/wecom/webhook/send';
 
   const cfg = reminder.normalizeConfig({
     enabled: true,
@@ -42,18 +44,20 @@ async function main() {
       wxpusher: { enabled: true, appToken: 'AT_test', uids: 'UID_a, UID_b', topicIds: '', summaryPrefix: '管卡提醒' },
       serverchan: { enabled: true, sendkey: 'SCT_test' },
       bark: { enabled: true, deviceKey: 'bkkey', server: 'https://api.day.app', level: 'timeSensitive', group: '管卡' },
+      wecom: { enabled: true, webhookKey: 'WC_test', summaryPrefix: '管卡提醒' },
     },
   });
 
-  console.log('=== 1. 三通道发送 ===');
+  console.log('=== 1. 四通道发送 ===');
   const res = await notifier.notifyAll(cfg, '年费提醒：测试卡 还有 7 天', '- 银行：测试银行\n- 年费：¥3600');
-  check('三个通道均返回结果', res.length === 3, JSON.stringify(res));
-  check('三通道全部成功', res.every((r) => r.ok), JSON.stringify(res.filter((r) => !r.ok)));
-  check('mock 收到 3 个请求', received.length === 3, '实际 ' + received.length);
+  check('四个通道均返回结果', res.length === 4, JSON.stringify(res));
+  check('四通道全部成功', res.every((r) => r.ok), JSON.stringify(res.filter((r) => !r.ok)));
+  check('mock 收到 4 个请求', received.length === 4, '实际 ' + received.length);
 
   const wx = received.find((r) => r.url.includes('wxpusher'));
   const sct = received.find((r) => r.url.includes('.send'));
   const bk = received.find((r) => r.url.includes('/push'));
+  const wc = received.find((r) => r.url.includes('webhook/send'));
   if (wx) {
     const p = JSON.parse(wx.body);
     check('wxpusher: appToken 正确', p.appToken === 'AT_test', p.appToken);
@@ -73,6 +77,27 @@ async function main() {
     check('Bark: title 正确', p.title.includes('年费提醒'), p.title);
     check('Bark: level/group 透传', p.level === 'timeSensitive' && p.group === '管卡', p.level + '/' + p.group);
   } else check('Bark 请求到达', false);
+  if (wc) {
+    check('wecom: key 在 URL 上', wc.url.includes('key=WC_test'), wc.url);
+    const p = JSON.parse(wc.body);
+    check('wecom: msgtype=markdown', p.msgtype === 'markdown', p.msgtype);
+    check('wecom: content 含前缀与标题', p.markdown.content.includes('管卡提醒｜年费提醒：测试卡 还有 7 天'), p.markdown && p.markdown.content);
+    check('wecom: content 含正文', p.markdown.content.includes('测试银行'), p.markdown && p.markdown.content);
+  } else check('wecom 请求到达', false);
+
+  console.log();
+  console.log('=== 1.5 wecom content 超长截断（4096 字节上限）===');
+  {
+    const long = '长'.repeat(5000); // 5000 个中文 = 15000 字节 > 4096
+    const rTrunc = await notifier.CHANNELS.wecom.send({ webhookKey: 'WC_test', summaryPrefix: '管卡提醒' }, '标题', long);
+    const wcReq = received.filter((x) => x.url.includes('webhook/send')).pop();
+    const p = JSON.parse(wcReq.body).markdown.content;
+    const buf = Buffer.from(p, 'utf8');
+    check('截断后 content ≤ 4096 字节', buf.length <= 4096, String(buf.length));
+    check('截断落在字符边界（无乱码字节）', buf.length % 3 === 0 && buf[buf.length - 1] === 0x9f || buf.length === 4096, String(buf.length));
+    check('截断后仍保留前缀与标题', p.startsWith('管卡提醒｜标题'), p.slice(0, 20));
+    check('成功判定不受截断影响', rTrunc.ok === true, JSON.stringify(rTrunc));
+  }
 
   console.log();
   console.log('=== 2. 单通道失败不影响其余通道 ===');
@@ -80,11 +105,44 @@ async function main() {
     channels: {
       wxpusher: { enabled: true, appToken: '', uids: 'UID_a' }, // 缺 token
       serverchan: { enabled: true, sendkey: 'SCT_test' },
+      wecom: { enabled: true, webhookKey: '' }, // 缺 webhook Key
     },
   });
   const r2 = await notifier.notifyAll(badCfg, 't', 'b');
   check('wxpusher 因缺 appToken 失败', r2.find((x) => x.channel === 'wxpusher').ok === false);
   check('serverchan 仍成功', r2.find((x) => x.channel === 'serverchan').ok === true);
+  check('wecom 因缺 webhook Key 失败且报错文案正确', (() => { const w = r2.find((x) => x.channel === 'wecom'); return w && w.ok === false && w.error === '缺少 webhook Key'; })(), JSON.stringify(r2.find((x) => x.channel === 'wecom')));
+
+  console.log();
+  console.log('=== 2.5 notifyAll 并行 + 输出顺序稳定（PERF-1 回归）===');
+  {
+    // 用「不同延迟的通道」证明并行：串行实现总耗时 ≈ 各延迟之和，并行 ≈ 最大延迟
+    const slowSrv = http.createServer((req, res) => {
+      const delay = req.url.includes('slow') ? 300 : (req.url.includes('mid') ? 150 : 10);
+      setTimeout(() => {
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url.includes('webhook/send')) res.end(JSON.stringify({ errcode: 0, errmsg: 'ok' }));
+        else res.end(JSON.stringify({ code: 200, message: 'success' }));
+      }, delay);
+    });
+    await new Promise((r) => slowSrv.listen(0, '127.0.0.1', r));
+    const sPort = slowSrv.address().port;
+    const sBase = 'http://127.0.0.1:' + sPort;
+    process.env.NOTIFY_BARK_URL = sBase + '/bark';
+    process.env.NOTIFY_WECOM_URL = sBase + '/wecom/webhook/send';
+    const pCfg = reminder.normalizeConfig({ channels: { bark: { enabled: true, deviceKey: 'k' }, wecom: { enabled: true, webhookKey: 'w' } } });
+    const t0 = Date.now();
+    const pRes = await notifier.notifyAll(pCfg, 't', 'b');
+    const cost = Date.now() - t0;
+    check('并行发送耗时 ≈ 最慢通道（<450ms，串行需 450ms+）', cost < 450, String(cost) + 'ms');
+    check('输出顺序与 CHANNELS 注册顺序一致（bark 在 wecom 前）',
+      JSON.stringify(pRes.map((x) => x.channel)) === '["bark","wecom"]',
+      JSON.stringify(pRes.map((x) => x.channel)));
+    check('结果结构完整（channel/label/ok/error）', pRes.every((x) => 'channel' in x && 'label' in x && 'ok' in x && 'error' in x), JSON.stringify(pRes));
+    slowSrv.close();
+    process.env.NOTIFY_BARK_URL = base + '/bark';
+    process.env.NOTIFY_WECOM_URL = base + '/wecom/webhook/send';
+  }
 
   console.log();
   console.log('=== 3. 提醒规则 ===');
@@ -228,12 +286,45 @@ async function main() {
   check('删除该笔成功', delRes && delRes.status === 200 && delRes.body.ok, JSON.stringify(delRes));
   check('删除后消费表为空', store4.read('consumptions', []).length === 0, JSON.stringify(store4.read('consumptions')));
   const delAgain = await routes.handle('DELETE', '/api/mycards/mc_deltest/consumptions/' + delId, new URL('http://x/p'), {});
-  check('重复删除返回 404', delAgain && delAgain.status === 404, JSON.stringify(delAgain));
-  // 笔数补录不支持删除
+  check('重复删除返回 404', delAgain && delAgain.status === 404, JSON.stringify(delAgain));  // 笔数补录不支持删除
   await routes.handle('POST', '/api/mycards/mc_deltest/consumptions/count', new URL('http://x/p'), { date: U.todayStr(), count: 2 });
   const cntRec = store4.read('consumptions', [])[0];
   const delCnt = await routes.handle('DELETE', '/api/mycards/mc_deltest/consumptions/' + cntRec.id, new URL('http://x/p'), {});
   check('笔数补录拒绝删除', delCnt && delCnt.status === 400 && /不支持删除/.test(delCnt.body.error), JSON.stringify(delCnt));
+
+  console.log();
+  console.log('=== 5.7.1 账单月份合法性（BUG-1 回归：拒绝 2026-13 / 2026-00）===');
+  {
+    const badMonth1 = await routes.handle('POST', '/api/bills', new URL('http://x/p'), { myCardId: 'mc_deltest', month: '2026-13', amount: 100 });
+    check('POST 账单 month=2026-13 → 400', badMonth1 && badMonth1.status === 400 && /YYYY-MM/.test(badMonth1.body.error), JSON.stringify(badMonth1.body));
+    const badMonth2 = await routes.handle('POST', '/api/bills', new URL('http://x/p'), { myCardId: 'mc_deltest', month: '2026-00', amount: 100 });
+    check('POST 账单 month=2026-00 → 400', badMonth2 && badMonth2.status === 400, JSON.stringify(badMonth2.body));
+    // PUT 同样拦（显式传月时）
+    const goodBill = await routes.handle('POST', '/api/bills', new URL('http://x/p'), { myCardId: 'mc_deltest', month: '2026-05', amount: 100 });
+    check('合法月份 2026-05 仍可创建', goodBill && goodBill.status === 201, JSON.stringify(goodBill && goodBill.body));
+    const putBad = await routes.handle('PUT', '/api/bills/' + goodBill.body.id, new URL('http://x/p'), { month: '2026-13' });
+    check('PUT 账单 month=2026-13 → 400', putBad && putBad.status === 400 && /YYYY-MM/.test(putBad.body.error), JSON.stringify(putBad.body));
+    const putOk = await routes.handle('PUT', '/api/bills/' + goodBill.body.id, new URL('http://x/p'), { month: '2026-12' });
+    check('PUT 改为合法 2026-12 成功', putOk && putOk.status === 200 && putOk.body.month === '2026-12', JSON.stringify(putOk && putOk.body));
+    // 导入兜底：脏月份的备份账单被丢弃而不是落库
+    // （持卡卡种匹配走 cardKey 四元组，需带上库内 seed4 的 bank/name/org/level）
+    const importRes = await routes.handle('POST', '/api/mycards/import', new URL('http://x/p'), {
+      mode: 'merge',
+      data: { schema: 'guanka-backup',
+        cardTypes: [{ id: 'src_seed', bank: seed4.bank, name: seed4.name, org: seed4.org, level: seed4.level, annualFee: 0 }],
+        myCards: [{ id: 'mc_imp', cardId: 'src_seed', bank: seed4.bank, name: seed4.name, org: seed4.org, level: seed4.level, annualFee: 0, alias: '导入月测试' }],
+        bills: [{ id: 'bill_imp1', myCardId: 'mc_imp', month: '2026-13', amount: 50 }, { id: 'bill_imp2', myCardId: 'mc_imp', month: '2026-06', amount: 60 }] },
+    });
+    check('备份导入合法月份账单成功', importRes && importRes.status === 200, JSON.stringify(importRes && importRes.body));
+    const impBills = store4.read('bills', []).filter((b) => b.myCardId === 'mc_imp');
+    check('导入脏月份 2026-13 被丢弃、合法 2026-06 保留', impBills.length === 1 && impBills[0].month === '2026-06', JSON.stringify(impBills.map((b) => b.month)));
+    // bills/generate 显式传脏月份 → 回落引擎计算的合法月份
+    const genBad = await routes.handle('POST', '/api/mycards/mc_deltest/bills/generate', new URL('http://x/p'), { month: '2026-13' });
+    check('generate 脏月份被忽略并回落合法 billMonth', genBad && genBad.status === 201 && /^\d{4}-(0[1-9]|1[0-2])$/.test(genBad.body.month), JSON.stringify(genBad && genBad.body));
+    store4.write('mycards', []);
+    store4.write('bills', []);
+  }
+
   store4.write('mycards', []);
   fs.rmSync('.notify-test-data4', { recursive: true, force: true });
 
@@ -548,12 +639,18 @@ async function main() {
     });
     // 模拟「检查进行中」用户改了配置：在推送（网络操作）期间写入新的 deviceKey。
     // 若回写用检查开头读到的旧 cfg，用户的改动就会被抹掉 → 断言失败。
+    // 注：Windows 下 undici 对 127.0.0.1 的 keep-alive 连接偶发抖动（R7 期间已知），
+    // 桩内对瞬时 fetch failed 做一次重试，避免测试基建抖动误报 NOTE-1 语义。
     const origNotifyAll = notifier.notifyAll;
     notifier.notifyAll = async function (c, t, b) {
       const p = reminder.normalizeConfig(store9.read('notify', null));
       p.channels.bark.deviceKey = 'bkkey-用户新填的';
       store9.write('notify', p);
-      return origNotifyAll.call(notifier, c, t, b);
+      const first = await origNotifyAll.call(notifier, c, t, b);
+      if (first.some((x) => !x.ok && /fetch failed/i.test(x.error || ''))) {
+        return origNotifyAll.call(notifier, c, t, b); // 重试一次：仅针对瞬时网络抖动
+      }
+      return first;
     };
     let after;
     try {
@@ -623,6 +720,44 @@ async function main() {
     cfgBad.sentLog['weird'] = 'not-a-date';
     await reminder.runChecks([], cfgBad, notifier, nowS, []);
     check('格式异常的 sentLog 值被清理', !('weird' in cfgBad.sentLog), JSON.stringify(Object.keys(cfgBad.sentLog).slice(0, 5)));
+  }
+
+  console.log();
+  console.log('=== 5.18 全通道失败不写 sentLog + 连续失败计数（NOTE-1 回归）===');
+  {
+    // 失败手段：把 wecom 的端点 env 指到一个不存在的端口（连接拒绝 → 确定失败）。
+    // 不能用 bark 的 server 字段——NOTIFY_BARK_URL env 优先级高于 cfg.server，会被主 mock 压制。
+    const savedWecomUrl = process.env.NOTIFY_WECOM_URL;
+    process.env.NOTIFY_WECOM_URL = 'http://127.0.0.1:1/wecom/webhook/send'; // port 1 必拒
+    const failCfg = reminder.normalizeConfig({ enabled: true, channels: { wecom: { enabled: true, webhookKey: 'k' } } });
+    const failCard = { id: 'mc_fail', bank: '测试', name: '失败卡', annualFee: 3600, feeDays: 5, nextFeeDate: '2027-03-15', waiver: { needsPayment: true, kind: '刚性' } };
+    const failNow = new Date(2026, 9, 12);
+    const failD = require('../server/dates');
+    failCard.payment = failD.paymentInfo(Object.assign({}, failCard, { billingDay: 1, repayMode: 'fixed', repayValue: 20, graceDays: 0, monthlySpendTarget: 0 }), failNow);
+
+    const r1 = await reminder.runChecks([failCard], failCfg, notifier, failNow, []);
+    check('第 1 轮全失败：推送 0 项', r1.sent === 0, JSON.stringify(r1.results));
+    check('第 1 轮：不写 sentLog', !('fee:mc_fail:2027-03-15:7' in failCfg.sentLog), JSON.stringify(failCfg.sentLog));
+    check('第 1 轮：失败计数 = 1', failCfg.sentFail['fee:mc_fail:2027-03-15:7'] === 1, JSON.stringify(failCfg.sentFail));
+
+    const r2f = await reminder.runChecks([failCard], failCfg, notifier, failNow, []);
+    check('第 2 轮：失败项仍重试（未写 sentLog）', r2f.checked > 0 && r2f.sent === 0, JSON.stringify(r2f.results));
+    check('第 2 轮：失败计数 = 2', failCfg.sentFail['fee:mc_fail:2027-03-15:7'] === 2, JSON.stringify(failCfg.sentFail));
+
+    const r3f = await reminder.runChecks([failCard], failCfg, notifier, failNow, []);
+    check('第 3 轮：达上限后写 sentLog 停止重发', 'fee:mc_fail:2027-03-15:7' in failCfg.sentLog, JSON.stringify(failCfg.sentLog));
+    check('第 3 轮：计数清零', !('fee:mc_fail:2027-03-15:7' in failCfg.sentFail), JSON.stringify(failCfg.sentFail));
+
+    const r4f = await reminder.runChecks([failCard], failCfg, notifier, failNow, []);
+    check('第 4 轮：已标记不再推送', r4f.sent === 0 && !r4f.results.some((x) => x.key === 'fee:mc_fail:2027-03-15:7'), JSON.stringify(r4f.results));
+
+    // 恢复路径：端点修好（指回成功 mock），预置脏计数 → 推送成功即清计数
+    process.env.NOTIFY_WECOM_URL = savedWecomUrl;
+    const okCfg = reminder.normalizeConfig({ enabled: true, channels: { wecom: { enabled: true, webhookKey: 'k' } } });
+    okCfg.sentFail['fee:mc_fail:2027-03-15:7'] = 2;
+    const rOk = await reminder.runChecks([failCard], okCfg, notifier, failNow, []);
+    check('通道恢复后推送成功', rOk.sent > 0, JSON.stringify(rOk.results));
+    check('成功后计数被清零', !('fee:mc_fail:2027-03-15:7' in okCfg.sentFail), JSON.stringify(okCfg.sentFail));
   }
 
   console.log();

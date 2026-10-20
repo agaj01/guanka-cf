@@ -58,6 +58,7 @@ const NOTIFY_SECRET_FIELDS = {
   wxpusher: ['appToken'],
   serverchan: ['sendkey'],
   bark: ['deviceKey'],
+  wecom: ['webhookKey'],
 };
 const MASK_PREFIX = '••••';
 
@@ -979,7 +980,7 @@ async function handle(method, pathname, url, body, req) {
       if (!r || typeof r !== 'object') continue;
       const newMyId = myIdMap.get(String(r.myCardId || ''));
       if (!newMyId) continue;
-      if (!/^\d{4}-\d{2}$/.test(String(r.month || ''))) continue;
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(r.month || ''))) continue;
       const key = newMyId + '|' + r.month;
       if (existingBillKeys.has(key)) continue; // 该卡该月账单已存在，跳过
       existingBillKeys.add(key);
@@ -1597,7 +1598,9 @@ async function handle(method, pathname, url, body, req) {
     const b = body || {};
     if (!b.myCardId) return err('缺少 myCardId');
     if (!getMyCards().some((m) => m.id === b.myCardId)) return err('持卡不存在', 404);
-    if (!/^\d{4}-\d{2}$/.test(String(b.month || ''))) return err('出账月份格式应为 YYYY-MM');
+    // 月份校验须限 01-12：仅查格式时 "2026-13" 会落库，billMonthLastDay 产出
+    // 镜像日期错位（落到 2027-01-31），卡年窗口/月度统计/同月唯一性全部错键
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(b.month || ''))) return err('出账月份格式应为 YYYY-MM（01-12）');
     const amount = Number(b.amount);
     if (!isFinite(amount) || amount < 0) return err('账单金额必须不小于 0');
     const bills = getBills();
@@ -1635,7 +1638,7 @@ async function handle(method, pathname, url, body, req) {
     let month = cur.month;
     if (b.month != null) {
       const nm = String(b.month).trim();
-      if (!/^\d{4}-\d{2}$/.test(nm)) return err('出账月份格式应为 YYYY-MM');
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(nm)) return err('出账月份格式应为 YYYY-MM（01-12）');
       if (nm !== cur.month && bills.some((x) => x.myCardId === cur.myCardId && x.month === nm)) {
         return err('该卡该月份账单已存在');
       }
@@ -1688,7 +1691,7 @@ async function handle(method, pathname, url, body, req) {
     const mc = getMyCards().find((m) => m.id === billGenMatch[1]);
     if (!mc) return err('持卡不存在', 404);
     const info = D.paymentInfo(mc, now);
-    const month = (body && /^\d{4}-\d{2}$/.test(String(body.month || ''))) ? String(body.month) : info.billMonth;
+    const month = (body && /^\d{4}-(0[1-9]|1[0-2])$/.test(String(body.month || ''))) ? String(body.month) : info.billMonth;
     const bills = getBills();
     const exist = bills.find((b) => b.myCardId === mc.id && b.month === month);
     if (exist) return json(exist);
@@ -2105,8 +2108,9 @@ async function handle(method, pathname, url, body, req) {
       }
     }
     const cfg = reminder.normalizeConfig(Object.assign({}, raw, incoming, {
-      // sentLog/history 不能被前端覆盖，只允许通过 check 结果更新
+      // sentLog/sentFail/history 不能被前端覆盖，只允许通过 check 结果更新
       sentLog: raw.sentLog || {},
+      sentFail: raw.sentFail || {},
       history: raw.history || [],
     }));
     store.write('notify', cfg);
@@ -2293,6 +2297,7 @@ async function runNotifyChecksInner(force) {
   const latest = reminder.normalizeConfig(getNotifyRaw());
   latest.lastCheckAt = cfg.lastCheckAt;
   latest.sentLog = cfg.sentLog;
+  latest.sentFail = cfg.sentFail; // 失败计数与 sentLog 同步回写，全失败重试语义才能跨轮次生效
   latest.history = cfg.history;
   store.write('notify', latest);
   return Object.assign({ skipped: false }, out);

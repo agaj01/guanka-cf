@@ -55,10 +55,10 @@ async function assertSafeBarkServer(raw) {
   }
 }
 
-/* ---------------- 提醒通道：wxpusher / Server酱³(sct) / Bark ----------------
+/* ---------------- 提醒通道：wxpusher / Server酱³(sct) / Bark / 企业微信(wecom) ----------------
  * - 零依赖：使用 Node 18+ 内置 fetch
  * - 每个通道独立 try/catch，单个通道失败不影响其余通道
- * - 端点可通过环境变量覆盖（NOTIFY_WXPUSHER_URL / NOTIFY_SCT_URL / NOTIFY_BARK_URL），便于本地 mock 测试
+ * - 端点可通过环境变量覆盖（NOTIFY_WXPUSHER_URL / NOTIFY_SCT_URL / NOTIFY_BARK_URL / NOTIFY_WECOM_URL），便于本地 mock 测试
  */
 const TIMEOUT_MS = 10000;
 
@@ -69,8 +69,12 @@ const TIMEOUT_MS = 10000;
  * 解析出的 data 为 null，`r.data &&` 直接短路 → **落到 return { ok: true }**。
  * 于是一整类失败（token 过期、被风控、上游降级）被静默记为「已推送成功」，
  * 用户看到一片绿色勾、实际一条都没收到，是最难排查的那类缺陷。
- * 这里把「响应格式异常」显式判为失败。 */
-function verdict(r, expectedCode, label, msgField) {
+ * 这里把「响应格式异常」显式判为失败。
+ *
+ * codeField：上游返回码的字段名。wxpusher/Server酱/Bark 都是 `code`，
+ * 企业微信是 `errcode`，缺省为 `code` 以保持既有调用不变。 */
+function verdict(r, expectedCode, label, msgField, codeField) {
+  const cf = codeField || 'code';
   if (!r.data || typeof r.data !== 'object') {
     return {
       ok: false,
@@ -78,11 +82,11 @@ function verdict(r, expectedCode, label, msgField) {
         String(r.raw || r.contentType || '').slice(0, 120),
     };
   }
-  if (r.data.code === undefined || r.data.code === null) {
-    return { ok: false, error: label + '响应缺少 code 字段：' + JSON.stringify(r.data).slice(0, 120) };
+  if (r.data[cf] === undefined || r.data[cf] === null) {
+    return { ok: false, error: label + '响应缺少 ' + cf + ' 字段：' + JSON.stringify(r.data).slice(0, 120) };
   }
-  if (r.data.code !== expectedCode) {
-    return { ok: false, error: label + '返回 ' + r.data.code + ': ' + ((msgField && r.data[msgField]) || '') };
+  if (r.data[cf] !== expectedCode) {
+    return { ok: false, error: label + '返回 ' + r.data[cf] + ': ' + ((msgField && r.data[msgField]) || '') };
   }
   return { ok: true, data: r.data };
 }
@@ -191,27 +195,71 @@ async function sendBark(cfg, title, content) {
   return verdict(r, 200, 'Bark', 'message');
 }
 
+// ---------------- 企业微信群机器人 (wecom) ----------------
+// POST https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<KEY>
+// {msgtype:'markdown', markdown:{content}}；成功判定 {errcode:0, errmsg:'ok'}
+const WECOM_CONTENT_MAX_BYTES = 4096; // 企业微信 markdown content 长度上限（UTF-8 字节）
+
+/** 按 UTF-8 字节数截断字符串（逐码点累计，不撕裂多字节字符） */
+function utf8Slice(str, maxBytes) {
+  const s = String(str || '');
+  if (Buffer.byteLength(s, 'utf8') <= maxBytes) return s;
+  let bytes = 0;
+  let end = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.codePointAt(i);
+    const w = c > 0xFFFF ? 4 : (c > 0x7FF ? 3 : (c > 0x7F ? 2 : 1));
+    if (bytes + w > maxBytes) break;
+    bytes += w;
+    end += c > 0xFFFF ? 2 : 1;
+    if (c > 0xFFFF) i++; // 跳过代理对的低位
+  }
+  return s.slice(0, end);
+}
+
+async function sendWecom(cfg, title, content) {
+  if (!cfg.webhookKey) return { ok: false, error: '缺少 webhook Key' };
+  const base = endpoint('NOTIFY_WECOM_URL', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send');
+  const url = base + (base.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(String(cfg.webhookKey).trim());
+  const text = String(cfg.summaryPrefix || '管卡提醒') + '｜' + title + '\n' + content;
+  const r = await postJson(url, {
+    msgtype: 'markdown',
+    markdown: { content: utf8Slice(text, WECOM_CONTENT_MAX_BYTES) },
+  });
+  if (!r.ok) return r;
+  // 企业微信返回 errcode=0 表示成功（其余通道是 code 字段）
+  return verdict(r, 0, '企业微信', 'errmsg', 'errcode');
+}
+
 const CHANNELS = {
   wxpusher: { label: 'WxPusher', send: sendWxpusher },
   serverchan: { label: 'Server酱³', send: sendServerChan },
   bark: { label: 'Bark', send: sendBark },
+  wecom: { label: '企业微信', send: sendWecom },
 };
 
-/** 向所有已启用通道推送；返回 [{channel,label,ok,error}] */
+/** 向所有已启用通道推送；返回 [{channel,label,ok,error}]
+ * 并行发送（通道间无依赖，postJson/postForm 各自 try/catch + 超时已隔离错误），
+ * 最坏等待从「各通道超时之和」降为「单通道超时」；结果按 CHANNELS 注册顺序回填，输出结构稳定 */
 async function notifyAll(cfg, title, content) {
-  const results = [];
-  for (const key of Object.keys(CHANNELS)) {
+  const keys = Object.keys(CHANNELS).filter((key) => {
+    const chCfg = (cfg && cfg.channels && cfg.channels[key]) || {};
+    return chCfg.enabled;
+  });
+  const settled = await Promise.allSettled(keys.map((key) => {
     const ch = CHANNELS[key];
     const chCfg = (cfg && cfg.channels && cfg.channels[key]) || {};
-    if (!chCfg.enabled) continue;
-    try {
-      const r = await ch.send(chCfg, title, content);
-      results.push({ channel: key, label: ch.label, ok: !!r.ok, error: r.ok ? '' : (r.error || '发送失败') });
-    } catch (e) {
-      results.push({ channel: key, label: ch.label, ok: false, error: e && e.message ? e.message : String(e) });
+    return ch.send(chCfg, title, content);
+  }));
+  return settled.map((s, i) => {
+    if (s.status === 'fulfilled') {
+      const r = s.value;
+      return { channel: keys[i], label: CHANNELS[keys[i]].label, ok: !!r.ok, error: r.ok ? '' : (r.error || '发送失败') };
     }
-  }
-  return results;
+    // send 内部已 try/catch 兜底，rejected 属于意外抛错（如 AssertionError），仍需兜住
+    const e = s.reason;
+    return { channel: keys[i], label: CHANNELS[keys[i]].label, ok: false, error: e && e.message ? e.message : String(e) };
+  });
 }
 
 function enabledChannels(cfg) {

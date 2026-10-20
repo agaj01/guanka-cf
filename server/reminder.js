@@ -25,9 +25,11 @@ const DEFAULT_CONFIG = {
     wxpusher: { enabled: false, appToken: '', uids: '', topicIds: '', summaryPrefix: '管卡提醒' },
     serverchan: { enabled: false, sendkey: '' },
     bark: { enabled: false, deviceKey: '', server: 'https://api.day.app', level: 'active', group: '管卡' },
+    wecom: { enabled: false, webhookKey: '', summaryPrefix: '管卡提醒' },
   },
   rules: { feeDays: [30, 7, 1], repayBeforeDays: 3, taskRemainDays: 3, billBeforeDays: 3, billOverdueRemind: 1, assetExpiryDays: 7 },
   sentLog: {},
+  sentFail: {}, // key → 连续全通道失败次数（成功或达上限标记后清零）
   history: [],
 };
 
@@ -56,6 +58,7 @@ function normalizeConfig(raw) {
     cfg.rules.assetExpiryDays = Math.max(0, Math.min(90, Number(r.rules.assetExpiryDays) || 0));
   }
   cfg.sentLog = (r.sentLog && typeof r.sentLog === 'object') ? r.sentLog : {};
+  cfg.sentFail = (r.sentFail && typeof r.sentFail === 'object') ? r.sentFail : {};
   cfg.history = Array.isArray(r.history) ? r.history.slice(0, 30) : [];
   cfg.lastCheckAt = r.lastCheckAt || '';
 
@@ -68,6 +71,8 @@ function normalizeConfig(raw) {
   const bk = cfg.channels.bark;
   if (!bk.deviceKey && process.env.BARK_DEVICE_KEY) bk.deviceKey = process.env.BARK_DEVICE_KEY;
   if (!bk.server) bk.server = DEFAULT_CONFIG.channels.bark.server;
+  const wc = cfg.channels.wecom;
+  if (!wc.webhookKey && process.env.WECOM_WEBHOOK_KEY) wc.webhookKey = process.env.WECOM_WEBHOOK_KEY;
   return cfg;
 }
 
@@ -308,6 +313,11 @@ function diffDaysOf(dateStr, now) {
   return Math.round((t - t0) / 86400000);
 }
 
+/** 全通道连续失败达该次数后恢复写 sentLog：上游永久故障时若一直不标记，
+ * 每轮检查都会重发（轰炸用户收件箱）；标记后该提醒静默等下一周期，
+ * 与「部分成功也算已送达」的老口径一致。 */
+const SENT_FAIL_MAX = 3;
+
 /** 执行检查并推送：去重（同一 key 只推一次）→ 发送 → 记录历史 */
 async function runChecks(cards, cfg, notifier, now, bills, assetData) {
   now = now || new Date();
@@ -324,9 +334,22 @@ async function runChecks(cards, cfg, notifier, now, bills, assetData) {
     const errList = sent.filter((s) => !s.ok).map((s) => `${s.label}: ${s.error}`);
     if (sent.length === 0) {
       results.push({ type: it.type, key: it.key, title: it.title, ok: false, error: '没有已启用的提醒通道' });
-    } else {
+    } else if (okList.length > 0) {
+      // 至少一个通道成功才标记去重；全失败时下轮重试（见下方 sentFail 逻辑）
       cfg.sentLog[it.key] = date;
-      results.push({ type: it.type, key: it.key, title: it.title, ok: okList.length > 0, sent: okList, error: errList.join('；') });
+      delete cfg.sentFail[it.key];
+      results.push({ type: it.type, key: it.key, title: it.title, ok: true, sent: okList, error: errList.join('；') });
+    } else {
+      // 全通道失败：不写 sentLog（原实现全失败也写，该提醒被静默吞掉直到 120 天淘汰）。
+      // 改记连续失败计数，达 SENT_FAIL_MAX 后标记 sentLog 停止重发——
+      // 上游永久故障时每轮轰炸不如放弃这一条，等下个提醒周期再试。
+      const n = (Number(cfg.sentFail[it.key]) || 0) + 1;
+      cfg.sentFail[it.key] = n;
+      if (n >= SENT_FAIL_MAX) {
+        cfg.sentLog[it.key] = date;
+        delete cfg.sentFail[it.key];
+      }
+      results.push({ type: it.type, key: it.key, title: it.title, ok: false, error: errList.join('；') });
     }
     pushHistory(cfg, {
       time: now.toISOString(),
@@ -362,6 +385,14 @@ function pruneSentLog(cfg, now) {
     const d = log[k];
     // 值应为「推送日期」字符串；格式异常或早于保留窗口的一律清掉
     if (typeof d !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(d) || d < cutoffStr) delete log[k];
+  }
+  // 失败计数与 sentLog 同生命周期：key 已被去重标记（成功/达上限）后计数即清零，
+  // 这里只兜底清「sentLog 里已不存在却还留着计数」的孤儿项，防字典无限增长
+  const fail = cfg.sentFail;
+  if (fail && typeof fail === 'object') {
+    for (const k of Object.keys(fail)) {
+      if (!(k in log) || typeof fail[k] !== 'number') delete fail[k];
+    }
   }
 }
 

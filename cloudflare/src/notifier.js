@@ -65,16 +65,17 @@ async function assertSafeBarkServer(raw) {
   }
 }
 
-/* 判定上游返回码（与 server/notifier.js verdict 一致） */
-function verdict(r, expectedCode, label, msgField) {
+/* 判定上游返回码（与 server/notifier.js verdict 一致；codeField 缺省 code，企业微信传 errcode） */
+function verdict(r, expectedCode, label, msgField, codeField) {
+  const cf = codeField || 'code';
   if (!r.data || typeof r.data !== 'object') {
     return { ok: false, error: label + '返回非 JSON 响应（HTTP 200）：' + String(r.raw || r.contentType || '').slice(0, 120) };
   }
-  if (r.data.code === undefined || r.data.code === null) {
-    return { ok: false, error: label + '响应缺少 code 字段：' + JSON.stringify(r.data).slice(0, 120) };
+  if (r.data[cf] === undefined || r.data[cf] === null) {
+    return { ok: false, error: label + '响应缺少 ' + cf + ' 字段：' + JSON.stringify(r.data).slice(0, 120) };
   }
-  if (r.data.code !== expectedCode) {
-    return { ok: false, error: label + '返回 ' + r.data.code + ': ' + ((msgField && r.data[msgField]) || '') };
+  if (r.data[cf] !== expectedCode) {
+    return { ok: false, error: label + '返回 ' + r.data[cf] + ': ' + ((msgField && r.data[msgField]) || '') };
   }
   return { ok: true, data: r.data };
 }
@@ -147,27 +148,70 @@ async function sendBark(env, cfg, title, content) {
   return verdict(r, 200, 'Bark', 'message');
 }
 
+// ---------------- 企业微信群机器人 (wecom)（语义与 server/notifier.js 逐字节一致）----------------
+// POST https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<KEY>
+// {msgtype:'markdown', markdown:{content}}；成功判定 {errcode:0, errmsg:'ok'}
+const WECOM_CONTENT_MAX_BYTES = 4096; // 企业微信 markdown content 长度上限（UTF-8 字节）
+const UTF8 = new TextEncoder();       // Workers 无 Buffer，用 TextEncoder 算字节数
+
+/** 按 UTF-8 字节数截断字符串（逐码点累计，不撕裂多字节字符；与 Node 版同语义） */
+function utf8Slice(str, maxBytes) {
+  const s = String(str || '');
+  if (UTF8.encode(s).length <= maxBytes) return s;
+  let bytes = 0;
+  let end = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.codePointAt(i);
+    const w = c > 0xFFFF ? 4 : (c > 0x7FF ? 3 : (c > 0x7F ? 2 : 1));
+    if (bytes + w > maxBytes) break;
+    bytes += w;
+    end += c > 0xFFFF ? 2 : 1;
+    if (c > 0xFFFF) i++; // 跳过代理对的低位
+  }
+  return s.slice(0, end);
+}
+
+async function sendWecom(env, cfg, title, content) {
+  if (!cfg.webhookKey) return { ok: false, error: '缺少 webhook Key' };
+  const base = endpoint(env, 'NOTIFY_WECOM_URL', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send');
+  const url = base + (base.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(String(cfg.webhookKey).trim());
+  const text = String(cfg.summaryPrefix || '管卡提醒') + '｜' + title + '\n' + content;
+  const r = await postJson(url, {
+    msgtype: 'markdown',
+    markdown: { content: utf8Slice(text, WECOM_CONTENT_MAX_BYTES) },
+  });
+  if (!r.ok) return r;
+  // 企业微信返回 errcode=0 表示成功（其余通道是 code 字段）
+  return verdict(r, 0, '企业微信', 'errmsg', 'errcode');
+}
+
 const CHANNELS = {
   wxpusher: { label: 'WxPusher', send: sendWxpusher },
   serverchan: { label: 'Server酱³', send: sendServerChan },
   bark: { label: 'Bark', send: sendBark },
+  wecom: { label: '企业微信', send: sendWecom },
 };
 
-/** 向所有已启用通道推送（env 首参，语义对齐 notifier.notifyAll） */
+/** 向所有已启用通道推送（env 首参，语义对齐 notifier.notifyAll）
+ * 并行发送 + 按 CHANNELS 注册顺序回填，与 server/notifier.js 逐字节同语义 */
 async function notifyAll(env, cfg, title, content) {
-  const results = [];
-  for (const key of Object.keys(CHANNELS)) {
+  const keys = Object.keys(CHANNELS).filter((key) => {
+    const chCfg = (cfg && cfg.channels && cfg.channels[key]) || {};
+    return chCfg.enabled;
+  });
+  const settled = await Promise.allSettled(keys.map((key) => {
     const ch = CHANNELS[key];
     const chCfg = (cfg && cfg.channels && cfg.channels[key]) || {};
-    if (!chCfg.enabled) continue;
-    try {
-      const r = await ch.send(env, chCfg, title, content);
-      results.push({ channel: key, label: ch.label, ok: !!r.ok, error: r.ok ? '' : (r.error || '发送失败') });
-    } catch (e) {
-      results.push({ channel: key, label: ch.label, ok: false, error: e && e.message ? e.message : String(e) });
+    return ch.send(env, chCfg, title, content);
+  }));
+  return settled.map((s, i) => {
+    if (s.status === 'fulfilled') {
+      const r = s.value;
+      return { channel: keys[i], label: CHANNELS[keys[i]].label, ok: !!r.ok, error: r.ok ? '' : (r.error || '发送失败') };
     }
-  }
-  return results;
+    const e = s.reason;
+    return { channel: keys[i], label: CHANNELS[keys[i]].label, ok: false, error: e && e.message ? e.message : String(e) };
+  });
 }
 
 function enabledChannels(cfg) {
