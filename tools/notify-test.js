@@ -7,6 +7,8 @@ const notifier = require('../server/notifier');
 const reminder = require('../server/reminder');
 
 const received = [];
+// barkGw：模拟「GET 400 → POST 200」的 Tomcat 式网关（验证回退）；其余网关 GET/POST 都 200
+let barkGw = true;
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
@@ -16,7 +18,16 @@ const server = http.createServer((req, res) => {
     if (req.url.includes('wxpusher')) res.end(JSON.stringify({ code: 1000, msg: '成功', success: true }));
     else if (req.url.includes('webhook/send')) res.end(JSON.stringify({ errcode: 0, errmsg: 'ok' }));
     else if (req.url.includes('.send')) res.end(JSON.stringify({ code: 0, message: '', data: {} }));
-    else if (req.url.includes('/bark')) res.end(JSON.stringify({ code: 200, message: 'success' }));
+    else if (req.url.includes('/bark')) {
+      if (req.method === 'GET' && barkGw) {
+        // Tomcat 式拒绝：HTML 400
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/html');
+        res.end('<!doctype html><html><head><title>HTTP Status 400 – Bad Request</title></head></html>');
+      } else {
+        res.end(JSON.stringify({ code: 200, message: 'success' }));
+      }
+    }
     else res.end('{}');
   });
 });
@@ -52,11 +63,11 @@ async function main() {
   const res = await notifier.notifyAll(cfg, '年费提醒：测试卡 还有 7 天', '- 银行：测试银行\n- 年费：¥3600');
   check('四个通道均返回结果', res.length === 4, JSON.stringify(res));
   check('四通道全部成功', res.every((r) => r.ok), JSON.stringify(res.filter((r) => !r.ok)));
-  check('mock 收到 4 个请求', received.length === 4, '实际 ' + received.length);
+  // bark GET 400 → POST 回退：4 通道 = 5 次请求（bark 2 次 + 其余 3 通道各 1 次）
+  check('mock 收到 ' + (barkGw ? 5 : 4) + ' 个请求', received.length === (barkGw ? 5 : 4), '实际 ' + received.length);
 
   const wx = received.find((r) => r.url.includes('wxpusher'));
   const sct = received.find((r) => r.url.includes('.send'));
-  const bk = received.find((r) => r.url.includes('/bark'));
   const wc = received.find((r) => r.url.includes('webhook/send'));
   if (wx) {
     const p = JSON.parse(wx.body);
@@ -71,16 +82,29 @@ async function main() {
     check('Server酱: form 编码', String(sct.ctype).includes('x-www-form-urlencoded'), String(sct.ctype));
     check('Server酱: 含 title/desp', sct.body.includes('title=') && sct.body.includes('desp='), sct.body.slice(0, 120));
   } else check('Server酱请求到达', false);
+  const barkReqs = received.filter((r) => r.url.includes('/bark'));
+  const bk = barkReqs[barkReqs.length - 1]; // 最后一次 = 实际生效的请求（GET 或回退 POST）
   if (bk) {
-    // GET 路径式：/{deviceKey}/{title}/{body}?level=&group=&isArchive=1
-    check('Bark: GET 方法', bk.method === 'GET', bk.method);
-    const q = bk.url.slice(bk.url.indexOf('?') + 1);
-    const pathDecoded = decodeURIComponent(bk.url.slice(0, bk.url.indexOf('?')).replace(/^\/bark\/?/, ''));
-    const segs = pathDecoded.split('/');
-    check('Bark: deviceKey 段正确', segs[0] === 'bkkey', segs[0]);
-    check('Bark: title 段正确', (segs[1] || '').includes('年费提醒'), segs[1]);
-    check('Bark: level/group 透传', q.includes('level=timeSensitive') && decodeURIComponent(q).includes('group=管卡'), q);
-    check('Bark: isArchive=1', q.includes('isArchive=1'), q);
+    // 策略断言：先 GET 路径式，网关 400 后回退 POST /push
+    check('Bark: 首选 GET 路径式', barkReqs[0] && barkReqs[0].method === 'GET', barkReqs[0] && barkReqs[0].method);
+    const bkPost = barkReqs.find((r) => r.method === 'POST');
+    if (barkGw) {
+      check('Bark: 网关 400 后回退 POST', !!bkPost, 'POST 次数 ' + barkReqs.filter((r) => r.method === 'POST').length);
+      const p = bkPost ? JSON.parse(bkPost.body) : {};
+      check('Bark: POST device_key 正确', p.device_key === 'bkkey', p.device_key);
+      check('Bark: POST title 正确', (p.title || '').includes('年费提醒'), p.title);
+      check('Bark: POST level/group 透传', p.level === 'timeSensitive' && p.group === '管卡', p.level + '/' + p.group);
+      check('Bark: POST isArchive=1', p.isArchive === 1, String(p.isArchive));
+    } else {
+      // GET 直接成功形态：URL 段解析
+      check('Bark: GET 成功无回退', !bkPost, '不应出现 POST');
+      const q = bk.url.slice(bk.url.indexOf('?') + 1);
+      const pathDecoded = decodeURIComponent(bk.url.slice(0, bk.url.indexOf('?')).replace(/^\/bark\/?/, ''));
+      const segs = pathDecoded.split('/');
+      check('Bark: GET deviceKey 段正确', segs[0] === 'bkkey', segs[0]);
+      check('Bark: GET title 段正确', (segs[1] || '').includes('年费提醒'), segs[1]);
+      check('Bark: GET level/group/isArchive', q.includes('level=timeSensitive') && decodeURIComponent(q).includes('group=管卡') && q.includes('isArchive=1'), q);
+    }
   } else check('Bark 请求到达', false);
   if (wc) {
     check('wecom: key 在 URL 上', wc.url.includes('key=WC_test'), wc.url);

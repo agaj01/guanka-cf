@@ -150,8 +150,8 @@ async function sendServerChan(env, cfg, title, content) {
 }
 
 // ---------------- Bark ----------------
-// GET {base}/{deviceKey}/{title}/{body}?level=&group=&isArchive=1（Bark 官方路径式 URL，
-// 与 Node 版 server/notifier.js 语义一致：逐段 encodeURIComponent + UTF-8 字节预算截断）
+// Bark 官方两种等价接口：GET 路径式 + POST /push JSON（语义与 Node 版 server/notifier.js 一致）。
+// 个别网关（Tomcat 等）对编码路径段直接回 HTTP 400，先 GET 失败后自动回退 POST。
 const BARK_URL_BUDGET_BYTES = 2000;
 const BARK_TITLE_MAX_BYTES = 100;
 
@@ -160,17 +160,26 @@ async function sendBark(env, cfg, title, content) {
   if (!override) await assertSafeBarkServer(cfg.server);
   const base = (override || cfg.server || 'https://api.day.app').replace(/\/$/, '');
   if (!cfg.deviceKey) return { ok: false, error: '缺少 deviceKey' };
+  // 1) GET 路径式
   const q = new URLSearchParams();
   q.set('level', cfg.level || 'active');
   if (cfg.group) q.set('group', cfg.group);
   q.set('isArchive', '1');
-  const url = base
+  const getUrl = base
     + '/' + encodeURIComponent(String(cfg.deviceKey || ''))
     + '/' + encodeURIComponent(utf8Slice(title, BARK_TITLE_MAX_BYTES))
     + '/' + encodeURIComponent(utf8Slice(content, BARK_URL_BUDGET_BYTES))
     + '?' + q.toString();
-  const r = await getJson(url);
-  if (!r.ok) return r;
+  const g = await getJson(getUrl);
+  if (g.ok) return verdict(g, 200, 'Bark', 'message');
+  // 2) 回退 POST /push（JSON）
+  const r = await postJson(base + '/push', {
+    device_key: cfg.deviceKey, title: title.slice(0, 100), body: content,
+    level: cfg.level || 'active', group: cfg.group || '管卡', isArchive: 1,
+  });
+  if (!r.ok) {
+    return { ok: false, error: r.error + '（GET 路径式已先行失败：' + String(g.error || '').slice(0, 120) + '）' };
+  }
   return verdict(r, 200, 'Bark', 'message');
 }
 

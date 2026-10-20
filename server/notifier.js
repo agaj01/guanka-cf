@@ -195,9 +195,12 @@ async function sendServerChan(cfg, title, content) {
 }
 
 // ---------------- Bark ----------------
-// GET {base}/{deviceKey}/{title}/{body}?level=&group=&isArchive=1（Bark 官方路径式 URL）
-// 路径段逐段 encodeURIComponent；标题/正文按 UTF-8 字节预算截断，防止最终 URL 超长被服务端拒绝
-const BARK_URL_BUDGET_BYTES = 2000; // 保守预算：官方与常见网关（Nginx 默认 ~4K~8K）都不会拒
+// Bark 官方两种等价接口：
+//   GET  {base}/{deviceKey}/{title}/{body}?level=&group=&isArchive=1 —— 路径式，个别
+//        反代（Tomcat/某些 CDN）对编码路径段直接回 HTTP 400（请求未到 Bark）
+//   POST {base}/push  JSON {device_key,title,body,level,group,isArchive} —— 同语义
+// 策略：先 GET，失败（HTTP 4xx/5xx 或网络错误）自动回退 POST——两种网关都能通。
+const BARK_URL_BUDGET_BYTES = 2000; // GET 路径 URL 保守预算（网关 URI 限制不一）
 const BARK_TITLE_MAX_BYTES = 100;
 
 /** GET /push 的 URL 构造：路径拼接 + 参数透传（供测试断言与 Workers 版共享语义） */
@@ -219,9 +222,22 @@ async function sendBark(cfg, title, content) {
   if (!override) await assertSafeBarkServer(cfg.server);
   const base = (override || cfg.server || 'https://api.day.app').replace(/\/$/, '');
   if (!cfg.deviceKey) return { ok: false, error: '缺少 deviceKey' };
-  const r = await getJson(barkGetUrl(base, cfg, title, content));
-  if (!r.ok) return r;
-  // {code:200,...}
+  // 1) 先走 GET 路径式
+  const g = await getJson(barkGetUrl(base, cfg, title, content));
+  if (g.ok) return verdict(g, 200, 'Bark', 'message');
+  // 2) 网关拒绝（如 Tomcat 400 HTML）或网络错误 → 回退 POST /push（JSON）
+  const r = await postJson(base + '/push', {
+    device_key: cfg.deviceKey,
+    title: title.slice(0, 100),
+    body: content,
+    level: cfg.level || 'active',
+    group: cfg.group || '管卡',
+    isArchive: 1,
+  });
+  if (!r.ok) {
+    // 汇报两次尝试：主错误（POST 结果）+ GET 前因，便于定位网关问题
+    return { ok: false, error: r.error + '（GET 路径式已先行失败：' + String(g.error || '').slice(0, 120) + '）' };
+  }
   return verdict(r, 200, 'Bark', 'message');
 }
 
