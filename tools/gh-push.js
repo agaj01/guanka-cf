@@ -13,7 +13,17 @@ const ROOT = path.join(__dirname, '..');
 const API = 'https://api.github.com';
 
 // 遍历工作区收集待发布文件（规则与 .gitignore 保持一致；不使用 execSync，本环境禁止 spawn）
-const SKIP_DIRS = new Set(['.git', 'node_modules', '.test-data', '.bench-data']);
+// SKIP_DIRS 必须覆盖 .gitignore 全部目录项（曾因漏 .backup-test-data/.wrangler 把测试临时
+// 文件推上远端 commit b4cf369，见 2026-10-20 日志）
+const SKIP_DIRS = new Set([
+  '.git', 'node_modules',
+  // .gitignore「测试/基准产物」段
+  '.test-data', '.bench-data', '.notify-test-data', '.notify-test-data2',
+  '.uitest-data', '.r5-data', '.r5probe2-data', '.probe-data', '.bgprobe-data',
+  '.r7probe-data', '.t-data', '.t-data2', '.t-data3', '.b-data',
+  '.backup-test-data', '.wrangler',
+  // gitignore 通配目录（.notify-test-data*/ 等运行时可能派生新变体，walk 时动态判断）
+]);
 const FILES = [];
 (function walk(dir, prefix) {
   for (const name of fs.readdirSync(dir)) {
@@ -22,6 +32,8 @@ const FILES = [];
     const st = fs.statSync(abs);
     if (st.isDirectory()) {
       if (SKIP_DIRS.has(name)) continue;
+      // 通配目录变体兜底：.notify-test-data*/ 等（.gitignore 中以 * 结尾的规则）
+      if (/^(notify-test-data|r7probe)/.test(name) && name.startsWith('.')) continue;
       walk(abs, rel);
       continue;
     }
