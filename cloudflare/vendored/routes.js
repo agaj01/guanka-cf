@@ -1052,34 +1052,43 @@ async function handle(method, pathname, url, body, req) {
     }
 
     // —— 落库 ——
+    // replace 模式：9 个 write 连续执行无事务包裹——第 N 个 write 抛错时前 N-1 个
+    // 已落盘，出现「部分替换」：新数据与旧数据混存、外键引用可能不一致。
+    // 包 try 包裹：任一 write 失败则返回错误，让用户知道导入未完成需重试。
     if (mode === 'replace') {
-      store.write('mycards', safeMyCards);
-      store.write('consumptions', safeCons);
-      store.write('benefits', safeBens);
-      store.write('bills', safeBills);
-      store.write('billGroups', finalGroups);
-      store.write('memberships', safeMemberships);
-      store.write('vouchers', safeVouchers);
-      store.write('voucherBrands', safeBrands);
-      store.write('knowledge', safeKnowledge);
+      try {
+        store.write('mycards', safeMyCards);
+        store.write('consumptions', safeCons);
+        store.write('benefits', safeBens);
+        store.write('bills', safeBills);
+        store.write('billGroups', finalGroups);
+        store.write('memberships', safeMemberships);
+        store.write('vouchers', safeVouchers);
+        store.write('voucherBrands', safeBrands);
+        store.write('knowledge', safeKnowledge);
+      } catch (e) {
+        return err('导入失败（数据已部分写入，请检查磁盘空间后重试）：' + e.message);
+      }
     } else {
-      const myCards = getMyCards();
-      // merge 模式再防一手 id 撞车（前面 existingMyIds 已排除，这里双保险重建数组）
-      const have = new Set(myCards.map((m) => m.id));
-      for (const mc of safeMyCards) if (!have.has(mc.id)) myCards.push(mc);
-      store.write('mycards', myCards);
-      const cons = getConsumptions().concat(safeCons);
-      store.write('consumptions', cons);
-      const bens = getBenefits().concat(safeBens);
-      store.write('benefits', bens);
-      const bills = getBills().concat(safeBills);
-      store.write('bills', bills);
-      store.write('billGroups', finalGroups);
-      // 扩展资产 merge 追加（id/名称已在归一化段预检排除）
-      store.write('memberships', getMemberships().concat(safeMemberships));
-      store.write('vouchers', getVouchers().concat(safeVouchers));
-      store.write('voucherBrands', getVoucherBrands().concat(safeBrands));
-      store.write('knowledge', getKnowledge().concat(safeKnowledge));
+      try {
+        const myCards = getMyCards();
+        const have = new Set(myCards.map((m) => m.id));
+        for (const mc of safeMyCards) if (!have.has(mc.id)) myCards.push(mc);
+        store.write('mycards', myCards);
+        const cons = getConsumptions().concat(safeCons);
+        store.write('consumptions', cons);
+        const bens = getBenefits().concat(safeBens);
+        store.write('benefits', bens);
+        const bills = getBills().concat(safeBills);
+        store.write('bills', bills);
+        store.write('billGroups', finalGroups);
+        store.write('memberships', getMemberships().concat(safeMemberships));
+        store.write('vouchers', getVouchers().concat(safeVouchers));
+        store.write('voucherBrands', getVoucherBrands().concat(safeBrands));
+        store.write('knowledge', getKnowledge().concat(safeKnowledge));
+      } catch (e) {
+        return err('导入失败（数据已部分写入，请检查磁盘空间后重试）：' + e.message);
+      }
     }
     store.write('cards', cards);
     cleanBillGroups();

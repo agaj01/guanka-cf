@@ -329,18 +329,20 @@ async function runChecks(cards, cfg, notifier, now, bills, assetData) {
   const assetItems = assetData ? require('./assets').collectAssetExpiry(assetData, cfg, now) : [];
   const items = collectReminders(cards, cfg, now, bills).concat(assetItems);
   const pending = items.filter((it) => !cfg.sentLog[it.key]);
-  const results = [];
-  for (const it of pending) {
+  // 并行推送：原实现 for-await 串行，N 条慢上游把一轮检查拉长到 N×10s。
+  // 各条的 sentLog/sentFail key 互不相同，pushHistory 是同步操作（数组 push），
+  // Promise.all 并行安全。
+  const results = await Promise.all(pending.map(async (it) => {
     const sent = await notifier.notifyAll(cfg, it.title, it.body);
     const okList = sent.filter((s) => s.ok).map((s) => s.label);
     const errList = sent.filter((s) => !s.ok).map((s) => `${s.label}: ${s.error}`);
     if (sent.length === 0) {
-      results.push({ type: it.type, key: it.key, title: it.title, ok: false, error: '没有已启用的提醒通道' });
+      return { type: it.type, key: it.key, title: it.title, ok: false, error: '没有已启用的提醒通道', sent };
     } else if (okList.length > 0) {
       // 至少一个通道成功才标记去重；全失败时下轮重试（见下方 sentFail 逻辑）
       cfg.sentLog[it.key] = date;
       delete cfg.sentFail[it.key];
-      results.push({ type: it.type, key: it.key, title: it.title, ok: true, sent: okList, error: errList.join('；') });
+      return { type: it.type, key: it.key, title: it.title, ok: true, sent: okList, error: errList.join('；'), allSent: sent };
     } else {
       // 全通道失败：不写 sentLog（原实现全失败也写，该提醒被静默吞掉直到 120 天淘汰）。
       // 改记连续失败计数，达 SENT_FAIL_MAX 后标记 sentLog 停止重发——
@@ -351,14 +353,19 @@ async function runChecks(cards, cfg, notifier, now, bills, assetData) {
         cfg.sentLog[it.key] = date;
         delete cfg.sentFail[it.key];
       }
-      results.push({ type: it.type, key: it.key, title: it.title, ok: false, error: errList.join('；') });
+      return { type: it.type, key: it.key, title: it.title, ok: false, error: errList.join('；'), sent };
     }
+  }));
+  // 记录历史：从 results 重建 sent 信息（并行后 sent 是局部变量，已通过 allSent/sent 字段传出）
+  for (let i = 0; i < pending.length; i++) {
+    const it = pending[i];
+    const r = results[i];
     pushHistory(cfg, {
       time: now.toISOString(),
       type: it.type,
       title: it.title,
-      channels: sent,
-      ok: okList.length > 0,
+      channels: r.allSent || r.sent || [],
+      ok: r.ok,
     });
   }
   pruneSentLog(cfg, now);
