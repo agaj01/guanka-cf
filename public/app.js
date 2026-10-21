@@ -1158,7 +1158,7 @@ function notifyModalHtml(cfg) {
       [['deviceKey', 'deviceKey', 'password', ''], ['server', '服务器地址', 'text', 'https://api.day.app'], ['level', '推送级别', 'text', 'active'], ['group', '分组', 'text', '管卡']]) +
     ch('wecom', '企业微信消息推送', '企业微信「消息推送」（原群机器人）：群聊右上角 →消息推送→ 添加/查看 → 复制 Webhook 地址的 key 参数',
       [['webhookKey', 'Webhook Key', 'password', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']],
-      '<div class="field full"><label style="display:flex;align-items:center;gap:8px;font-weight:400;cursor:pointer"><input type="checkbox" id="nc-wecom-wechatCompat"' + (c.wecom && c.wecom.wechatCompat ? ' checked' : '') + '> <span>微信兼容模式</span></label></div>') +
+      '<div class="field full"><label style="display:flex;align-items:center;justify-content:flex-start;gap:8px;font-weight:400;cursor:pointer"><input type="checkbox" id="nc-wecom-wechatCompat" style="width:16px;height:16px"' + (c.wecom && c.wecom.wechatCompat ? ' checked' : '') + '> <span>微信兼容模式</span></label></div>') +
     '<div class="notify-rules"><h4>提醒规则</h4><div class="form-grid">' +
     field('年费提前提醒天数（逗号分隔）', '<input id="n-feeDays" value="' + esc((cfg.rules.feeDays || []).join(',')) + '" placeholder="30,7,1">') +
     field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +
