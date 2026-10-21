@@ -121,7 +121,7 @@ async function main() {
   console.log();
   console.log('=== 1.6 wecomapp：2048 字节截断 + token 缓存 + 失效重取 ===');
   {
-    // a) 2048 字节截断（自建应用上限比 webhook 的 4096 小一档）
+    // a) 2048 字节截断（应用消息上限比 webhook 的 4096 小一档）
     const long = '长'.repeat(3000); // 9000 字节 > 2048
     const rTr = await notifier.CHANNELS.wecomapp.send(
       { corpid: 'CORP_test', corpsecret: 'SEC_test', agentid: '1000002', touser: '@all', summaryPrefix: '管卡提醒' }, '标题', long);

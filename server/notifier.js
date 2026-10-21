@@ -231,12 +231,15 @@ async function sendWecom(cfg, title, content) {
   return verdict(r, 0, '企业微信', 'errmsg', 'errcode');
 }
 
-// ---------------- 企业微信自建应用 (wecomapp) ----------------
-// 与 wecom（群机器人 webhook）并行的另一条官方通道：消息直达成员会话（非群聊）。
+// ---------------- 企业微信应用消息 (wecomapp) ----------------
+// 官方「发送应用消息」接口（文档 90236），与 wecom（群机器人 webhook）并行：
+// 消息直达应用可见范围内成员的会话（非群聊）。
 // 两段式：GET /cgi-bin/gettoken 拿 access_token（7200s TTL，有每日获取次数上限 → 必须全局缓存），
 //         POST /cgi-bin/message/send 下发消息；成功判定 errcode==0（与 webhook 相同）。
 // token 失效（40014 invalid access_token / 42001 access_token expired）清缓存重取一次再发。
 // markdown content 上限 2048 字节——比 webhook 通道的 4096 小一档，注意区分。
+// 注意：新建自建应用须在应用详情配置「企业可信IP」（60020 = 调用方 IP 不在白名单；
+// Cloudflare Workers 出站 IP 不固定，直连会报 60020，可用 NOTIFY_WECOM_APP_*_URL 指向固定 IP 代理）。
 // 端点固定 qyapi.weixin.qq.com，无用户可控服务器地址 → 无 SSRF 面（Bark 通道那套校验不适用）。
 const WECOM_APP_CONTENT_MAX_BYTES = 2048;
 const WECOM_APP_TOKEN_RETRY_CODES = [40014, 42001];
@@ -271,9 +274,9 @@ async function getWecomAppToken(corpid, secret) {
   const url = base + (base.includes('?') ? '&' : '?') + 'corpid=' + encodeURIComponent(corpid) + '&corpsecret=' + encodeURIComponent(secret);
   const r = await getJson(url);
   if (!r.ok) return r;
-  const v = verdict(r, 0, '企业微信自建应用(凭证)', 'errmsg', 'errcode');
+  const v = verdict(r, 0, '企业微信应用消息(凭证)', 'errmsg', 'errcode');
   if (!v.ok) return v;
-  if (!r.data.access_token) return { ok: false, error: '企业微信自建应用(凭证)响应缺少 access_token 字段' };
+  if (!r.data.access_token) return { ok: false, error: '企业微信应用消息(凭证)响应缺少 access_token 字段' };
   const token = String(r.data.access_token);
   wecomAppTokens.set(ck, { token, expiresAt: Date.now() + (Number(r.data.expires_in) || 7200) * 1000 });
   return { ok: true, token };
@@ -313,7 +316,7 @@ async function sendWecomApp(cfg, title, content) {
   }
   if (!r.ok) return r;
   // errcode=0 且 invaliduser 非空 = 部分账号无效，剩余账号已收到（官方语义仍算成功）
-  return verdict(r, 0, '企业微信自建应用', 'errmsg', 'errcode');
+  return verdict(r, 0, '企业微信应用消息', 'errmsg', 'errcode');
 }
 
 const CHANNELS = {
@@ -321,7 +324,7 @@ const CHANNELS = {
   serverchan: { label: 'Server酱³', send: sendServerChan },
   bark: { label: 'Bark', send: sendBark },
   wecom: { label: '企业微信', send: sendWecom },
-  wecomapp: { label: '企业微信自建应用', send: sendWecomApp },
+  wecomapp: { label: '企业微信应用消息', send: sendWecomApp },
 };
 
 /** 向所有已启用通道推送；返回 [{channel,label,ok,error}]
