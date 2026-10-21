@@ -228,11 +228,11 @@ async function main() {
   const nowCollapsed = $('.bank-group').classList.contains('collapsed');
   check('银行分组折叠/展开切换', wasCollapsed !== nowCollapsed);
 
-  // ---- 9. 切换到卡种数据库页 ----
-  const navCards = $('.nav-item[data-page="cards"]');
+  // ---- 9. 进入卡种数据库页（入口已收进我的持卡页工具栏）----
+  const navCards = $('#btn-cardsdb');
   navCards.click();
   const dbLoaded = await waitFor(() => $('.db-table'));
-  check('切换到卡种数据库页并渲染表格', dbLoaded);
+  check('经页内入口进入卡种数据库页并渲染表格', dbLoaded);
   if (dbLoaded) {
     const rows = $$('.db-table tbody tr').length;
     check('卡种表格有数据行（83+ 张）', rows > 80, 'rows=' + rows);
@@ -271,7 +271,7 @@ async function main() {
   check('主题切回', doc.documentElement.dataset.theme === themeBefore);
 
   // ---- 12. 添加持卡流程（选卡） ----
-  $('.nav-item[data-page="mycards"]').click();
+  $('#btn-cardsdb-back').click();
   await waitFor(() => $('#btn-add-card'));
   const addBtnEl = $('#btn-add-card');
   addBtnEl.click();

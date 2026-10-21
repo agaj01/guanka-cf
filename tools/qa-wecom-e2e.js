@@ -30,7 +30,7 @@ const upstream = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.url.includes('fail-key')) res.end(JSON.stringify({ errcode: 93000, errmsg: 'invalid webhook url' }));
     else if (req.url.includes('webhook/send')) res.end(JSON.stringify({ errcode: 0, errmsg: 'ok' }));
-    else if (req.url.includes('/bark')) res.end(JSON.stringify({ code: 200, message: 'success' }));
+    else if (req.url.includes('/push')) res.end(JSON.stringify({ code: 200, message: 'success' }));
     else if (req.url.includes('wxpusher')) res.end(JSON.stringify({ code: 1000, msg: 'ok' }));
     else res.end(JSON.stringify({ code: 0, message: '' }));
   });
