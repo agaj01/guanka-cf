@@ -7,6 +7,7 @@ data/*.tmp
 .test-data/
 .bench-data/
 .notify-test-data*/
+.ui-test-data/
 .uitest-data/
 .r5-data/
 .r5probe2-data/

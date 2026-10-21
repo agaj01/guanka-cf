@@ -96,9 +96,9 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 - 恢复：把备份解压到卷对应目录即可；或直接把宿主机目录挂载为卷：
   `docker run -v /your/data/dir:/app/data ...`（容器内以 node 用户运行，注意宿主机目录的读写权限）
 
-## 提醒功能（3 个通道）
+## 提醒功能（4 个通道）
 
-顶栏点击 🔔 打开「提醒设置」，可配置 **WxPusher / Server酱³ / Bark** 三个通道（可同时启用），
+顶栏点击 🔔 打开「提醒设置」，可配置 **WxPusher / Server酱³ / Bark / 企业微信** 四个通道（可同时启用），
 容器常驻进程定时检查并推送，**不需要 cron**。
 
 **提醒类型**
@@ -108,6 +108,10 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 | 年费到期 | 需缴费（未达标/未抵扣/刚性）且剩余天数跨过 30/7/1 天阈值 | 每个阈值只推一次 |
 | 还款日 | 距下次还款日 ≤ N 天（自动跨月） | N=3 |
 | 月刷卡任务 | 月末最后 N 天仍未达标 | N=3 |
+| 账单到期 | 账单日 + 宽限期后仍未还（含已过到期日） | 提前 N 天 + 逾期当天 |
+| 资产到期 | 会员卡/储值卡、卡/票、知识库订阅临近到期 | 提前 7 天 |
+
+> 多张卡合并账单后（见「合并账单」章节），整组只推 1 条还款提醒，不会逐卡轰炸。
 
 **通道参数**
 
@@ -116,8 +120,12 @@ docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data -
 | WxPusher | appToken、UID（多个逗号分隔）、主题ID（可选）、消息前缀 | wxpusher.zjiecode.com 后台 |
 | Server酱³ | SendKey（SCT/SCU 开头） | sct.ftqq.com |
 | Bark | deviceKey、服务器地址（自建填自己的）、级别、分组 | iOS Bark App 复制 key |
+| 企业微信 | Webhook Key、消息前缀、**微信兼容模式** | 企业微信群聊右上角 →消息推送→ 添加/查看 → 复制 Webhook 地址的 key 参数 |
 
-**安全建议**：所有推送凭证（appToken / SendKey / deviceKey）在 API 响应中一律以掩码
+> **企业微信「微信兼容模式」**：群机器人默认发 Markdown 消息，但在微信里（微信插件接收企业微信消息）
+> 会显示「暂不支持此消息类型」。勾选后改发纯文本消息，微信端可正常显示，代价是格式降级为纯文本。
+
+**安全建议**：所有推送凭证（appToken / SendKey / deviceKey / webhookKey）在 API 响应中一律以掩码
 （`••••` + 末 4 位）返回，不会明文回传；但在磁盘 `data/notify.json` 上仍是明文。
 更安全的做法是不填 UI、改用环境变量注入（配置为空时自动回退），这样凭证完全不落盘：
 
@@ -130,6 +138,7 @@ services:
       - WXPUSHER_UIDS=UID_xxx
       - SERVERCHAN_SENDKEY=SCTxxx
       - BARK_DEVICE_KEY=xxxxx
+      - WECOM_WEBHOOK_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
 > 自建 Bark 服务请用 `NOTIFY_BARK_URL` 环境变量配置，不要填 UI 里的「服务器地址」——

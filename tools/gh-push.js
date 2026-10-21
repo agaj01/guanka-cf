@@ -14,16 +14,21 @@ const API = 'https://api.github.com';
 
 // 遍历工作区收集待发布文件（规则与 .gitignore 保持一致；不使用 execSync，本环境禁止 spawn）
 // SKIP_DIRS 必须覆盖 .gitignore 全部目录项（曾因漏 .backup-test-data/.wrangler 把测试临时
-// 文件推上远端 commit b4cf369，见 2026-10-20 日志）
+// 文件推上远端 commit b4cf369，见 2026-10-20 日志）。
+// 注意：早期把 ui-test 数据目录误写为 .uitest-data（少连字符），实际目录是 .ui-test-data，
+// 导致该目录一度不在跳过列表里——两个名字都列上防回归。
 const SKIP_DIRS = new Set([
   '.git', 'node_modules',
   // .gitignore「测试/基准产物」段
   '.test-data', '.bench-data', '.notify-test-data', '.notify-test-data2',
-  '.uitest-data', '.r5-data', '.r5probe2-data', '.probe-data', '.bgprobe-data',
-  '.r7probe-data', '.t-data', '.t-data2', '.t-data3', '.b-data',
+  '.ui-test-data', '.uitest-data', '.r5-data', '.r5probe2-data', '.probe-data',
+  '.bgprobe-data', '.r7probe-data', '.t-data', '.t-data2', '.t-data3', '.b-data',
   '.backup-test-data', '.wrangler',
   // gitignore 通配目录（.notify-test-data*/ 等运行时可能派生新变体，walk 时动态判断）
 ]);
+// 按相对路径跳过的目录：构建产物不入库（cloudflare/.gitignore 已 ignore public/ 与
+// vendored/，但 gh-push 不看 .gitignore，需在此显式排除，否则 vendor 构建产物会被推上远端）
+const SKIP_RELS = new Set(['cloudflare/public', 'cloudflare/vendored']);
 const FILES = [];
 (function walk(dir, prefix) {
   for (const name of fs.readdirSync(dir)) {
@@ -32,6 +37,8 @@ const FILES = [];
     const st = fs.statSync(abs);
     if (st.isDirectory()) {
       if (SKIP_DIRS.has(name)) continue;
+      // 按相对路径排除构建产物目录（cloudflare/public、cloudflare/vendored）
+      if (SKIP_RELS.has(rel)) continue;
       // 通配目录变体兜底：.notify-test-data*/ 等（.gitignore 中以 * 结尾的规则）
       if (/^(notify-test-data|r7probe)/.test(name) && name.startsWith('.')) continue;
       walk(abs, rel);
