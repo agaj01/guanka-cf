@@ -1,7 +1,7 @@
 services:
   guanka:
     build: .
-    image: credit-card-manager:1.0.0
+    image: credit-card-manager:1.2.4
     container_name: credit-card-manager
     ports:
       # 只绑到宿主机回环：默认仅本机可访问，避免 Docker 的端口映射直接对所有网卡放行

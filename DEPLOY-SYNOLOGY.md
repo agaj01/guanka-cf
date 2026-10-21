@@ -130,7 +130,7 @@ head -c 32 /dev/urandom | base64
    services:
      guanka:
        build: .
-       image: credit-card-manager:1.0.0
+       image: credit-card-manager:1.2.4
        container_name: credit-card-manager
        ports:
          - "3000:3000"          # 局域网访问：绑所有网卡；想仅本机用改回 "127.0.0.1:3000:3000"
@@ -203,7 +203,7 @@ sudo docker compose up -d --build     # 更新代码后重新构建
 
    ```bash
    curl http://群晖IP:3000/api/health
-   # 期望：{"ok":true,"version":"1.0.0",...}
+   # 期望：{"ok":true,"version":"1.2.4",...}
    ```
 
 **排查清单（局域网打不开时按序检查）**
@@ -371,17 +371,17 @@ sudo docker compose logs -f          # 确认正常
 在任意装了 Docker 的电脑上构建并导出：
 
 ```bash
-docker build -t credit-card-manager:1.0.0 .
-docker save credit-card-manager:1.0.0 | gzip > credit-card-manager-1.0.0.tar.gz
+docker build -t credit-card-manager:1.2.4 .
+docker save credit-card-manager:1.2.4 | gzip > credit-card-manager-1.2.4.tar.gz
 ```
 
 把 tar.gz 传到 NAS，然后：
 
 ```bash
-sudo gunzip -c credit-card-manager-1.0.0.tar.gz | sudo docker load
+sudo gunzip -c credit-card-manager-1.2.4.tar.gz | sudo docker load
 ```
 
-此时把 compose 的 `build: .` 一行**删掉**（保留 `image: credit-card-manager:1.0.0`），
+此时把 compose 的 `build: .` 一行**删掉**（保留 `image: credit-card-manager:1.2.4`），
 再 `sudo docker compose up -d` 即可（不再需要源码）。
 
 > 注意架构一致：群晖绝大多数机型是 `x86_64`，少数 ARM 机型是 `arm64`/`armv7`。

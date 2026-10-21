@@ -27,11 +27,29 @@ docker compose up -d --build    # 改代码后重新构建
 不用 compose 也可以：
 
 ```bash
-docker build -t credit-card-manager:1.0.0 .
-docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data --restart unless-stopped credit-card-manager:1.0.0
+docker build -t credit-card-manager:1.2.4 .
+docker run -d --name credit-card-manager -p 3000:3000 -v guanka-data:/app/data --restart unless-stopped credit-card-manager:1.2.4
 ```
 
 首次启动自动写入内置卡种库（83 张常见卡 / 15 家银行，示例数据），无需任何配置。
+
+## 双版本：Docker 版与 Cloudflare Workers 版
+
+本项目有两个部署版本，**业务逻辑完全同源**（约 3500 行业务层零改动复用）：
+
+| | Docker 版（本 README） | Cloudflare Workers 版 |
+|---|---|---|
+| 运行环境 | Node.js 20 容器 | Cloudflare 边缘 |
+| 存储 | JSON 文件 + 卷 | Durable Object Storage |
+| 定时提醒 | 容器常驻进程轮询 | Cron Triggers（每 10 分钟） |
+| 访问控制 | 未设 AUTH_TOKEN 时仅回环 | **必须配置 AUTH_TOKEN** |
+| 数据位置 | 自己机器/NAS 的卷 | Cloudflare 全球边缘 |
+
+- 选 **Docker 版**：数据留在自己机器上，适合 NAS/自建服务器，本文档其余章节均针对它
+- 选 **Workers 版**：无需服务器、全球访问、免维护，但数据存 Cloudflare，且必须设 AUTH_TOKEN
+
+Workers 版的架构说明、部署步骤（`wrangler secret put AUTH_TOKEN` + `npm run deploy`）、
+时区处理、双版本数据互迁（备份导出/导入）详见 **[cloudflare/README.md](cloudflare/README.md)**。
 
 ## 在群晖 NAS 上部署
 
@@ -269,17 +287,21 @@ DATA_DIR=./data node server/index.js
 
 ## 开发自检（可选）
 
-三套自动化验证脚本，均无需额外依赖（`ui-test` 需 jsdom）：
+五套自动化验证脚本，均无需额外依赖（`ui-test` 需 jsdom）：
 
 | 脚本 | 覆盖范围 | 断言数 |
 |------|---------|--------|
 | `tools/dates-test.js` | 日期引擎：账单/还款日推导、宽限期选期、预警分级、跨年闰日钳制 | 39 |
-| `tools/notify-test.js` | 提醒引擎：三通道推送、去重、年费达标判定、权益生命周期与接口边界、合并账单组、**数据文件类型安全与损坏隔离、sentLog 淘汰** | 128 |
-| `tools/ui-test.js` | 前端逻辑：页面渲染、抽屉、记一笔、补录、权益超限拦截、编辑持卡、卡种库、主题切换、**合并账单组交互（含成员移出）** | 71 |
+| `tools/notify-test.js` | 提醒引擎：四通道推送、去重、年费达标判定、权益生命周期与接口边界、合并账单组、**数据文件类型安全与损坏隔离、sentLog 淘汰**、wecom 微信兼容模式转换 | 170 |
+| `tools/backup-test.js` | 备份导出/导入：merge 幂等、replace 全量替换、卡种四元组映射、外键回填、导入上限 | 54 |
+| `tools/qa-wecom-e2e.js` | 企业微信通道端到端：mask 回显、test 推送结构、前端 collect 一致性、卡片 DOM 归属 | 35 |
+| `tools/ui-test.js` | 前端逻辑：页面渲染、抽屉、记一笔、补录、权益超限拦截、编辑持卡、卡种库、主题切换、**合并账单组交互（含成员移出）** | 75 |
 
 ```bash
 node tools/dates-test.js             # 纯逻辑，直接跑
 node tools/notify-test.js            # 内置 mock 服务，直接跑
+node tools/backup-test.js            # 内置 mock 服务，直接跑
+node tools/qa-wecom-e2e.js           # 内置 mock 服务，直接跑
 
 npm i -g jsdom                       # ui-test 需要 jsdom
 node server/index.js &               # 先起服务
@@ -287,7 +309,7 @@ NODE_PATH=<jsdom所在node_modules> node tools/ui-test.js
 ```
 
 > `ui-test` 默认连 `localhost:3000`，端口不同时用 `TEST_PORT=3311` 指定。
-> 三套脚本结尾都会打印「通过 N/M 项」，便于直接核对断言总数。
+> 各套脚本结尾都会打印「通过 N/M 项」，便于直接核对断言总数。
 
 ## API 摘要
 
