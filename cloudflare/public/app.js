@@ -1142,11 +1142,11 @@ function showFeeExpiring() {
 // ---------- 提醒设置 ----------
 function notifyModalHtml(cfg) {
   const c = cfg.channels || {};
-  const ch = (key, label, desc, fields) =>
+  const ch = (key, label, desc, fields, extraHtml) =>
     '<div class="notify-channel">' +
     '<div class="nc-head"><label class="switch"><input type="checkbox" id="nc-' + key + '-enabled"' + (c[key] && c[key].enabled ? ' checked' : '') + '><b>' + label + '</b></label>' +
     '<span class="nc-desc">' + desc + '</span></div>' +
-    '<div class="form-grid nc-body">' + fields.map((f) => field(f[1], '<input id="nc-' + key + '-' + f[0] + '"' + (f[2] === 'password' ? ' type="password"' : (f[2] === 'number' ? ' type="number"' : '')) + ' placeholder="' + esc(f[3] || '') + '" value="' + esc((c[key] && c[key][f[0]]) != null ? String(c[key][f[0]]) : '') + '">')).join('') + '</div></div>';
+    '<div class="form-grid nc-body">' + fields.map((f) => field(f[1], '<input id="nc-' + key + '-' + f[0] + '"' + (f[2] === 'password' ? ' type="password"' : (f[2] === 'number' ? ' type="number"' : '')) + ' placeholder="' + esc(f[3] || '') + '" value="' + esc((c[key] && c[key][f[0]]) != null ? String(c[key][f[0]]) : '') + '">')).join('') + (extraHtml || '') + '</div></div>';
 
   return (
     '<label class="switch-row"><input type="checkbox" id="n-enabled"' + (cfg.enabled ? ' checked' : '') + '> <b>启用提醒</b>（容器常驻进程定时检查，无需 cron）</label>' +
@@ -1157,11 +1157,8 @@ function notifyModalHtml(cfg) {
     ch('bark', 'Bark', 'iOS 推送：Bark App 中复制 deviceKey（自建服务可改服务器地址）',
       [['deviceKey', 'deviceKey', 'password', ''], ['server', '服务器地址', 'text', 'https://api.day.app'], ['level', '推送级别', 'text', 'active'], ['group', '分组', 'text', '管卡']]) +
     ch('wecom', '企业微信消息推送', '企业微信「消息推送」（原群机器人）：群聊右上角 →消息推送→ 添加/查看 → 复制 Webhook 地址的 key 参数',
-      [['webhookKey', 'Webhook Key', 'password', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
-    '<div class="notify-rules" style="margin-top:-8px"><div class="form-grid">' +
-    '<div class="field full"><label style="display:flex;align-items:center;gap:8px;font-weight:400"><input type="checkbox" id="nc-wecom-wechatCompat"' + (c.wecom && c.wecom.wechatCompat ? ' checked' : '') + '> <span>微信兼容模式</span></label>' +
-    '<div style="font-size:12px;color:var(--text-2);line-height:1.6;margin-top:4px">勾选后改发纯文本消息：在微信（微信插件接收企业微信消息）里可正常显示；默认关闭时发 Markdown，格式更好看但微信端会显示「暂不支持此消息类型」</div></div>' +
-    '</div></div>' +
+      [['webhookKey', 'Webhook Key', 'password', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']],
+      '<div class="field full"><label style="display:flex;align-items:center;gap:8px;font-weight:400;cursor:pointer"><input type="checkbox" id="nc-wecom-wechatCompat"' + (c.wecom && c.wecom.wechatCompat ? ' checked' : '') + '> <span>微信兼容模式</span></label></div>') +
     '<div class="notify-rules"><h4>提醒规则</h4><div class="form-grid">' +
     field('年费提前提醒天数（逗号分隔）', '<input id="n-feeDays" value="' + esc((cfg.rules.feeDays || []).join(',')) + '" placeholder="30,7,1">') +
     field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +

@@ -195,6 +195,14 @@ async function main() {
   // notifyModalHtml 无条件渲染 wecom 块（非条件拼接），collect 不会遇到 undefined 元素
   const chBlock = appjs.match(/ch\('wecom'[\s\S]{0,200}/);
   check('F5 wecom 块为无条件渲染（三元/条件拼接不存在）', chBlock && !/conditions?\?/.test(chBlock[0]), chBlock ? chBlock[0].slice(0, 80) : 'missing');
+  // 微信兼容模式开关必须作为 ch('wecom', ...) 的第 5 个参数渲染在卡片 .nc-body 内部，
+  // 而不是作为 sibling 拼在卡片外面（独立 notify-rules 块）。
+  const wecomStart = appjs.indexOf("ch('wecom'");
+  const rulesStart = appjs.indexOf('<h4>提醒规则</h4>');
+  const wecomCallSrc = (wecomStart > -1 && rulesStart > wecomStart) ? appjs.slice(wecomStart, rulesStart) : '';
+  check('F6 兼容模式开关位于 wecom 卡片块内（ch 调用内）', !!wecomCallSrc && wecomCallSrc.includes('nc-wecom-wechatCompat'), wecomCallSrc ? 'ok len=' + wecomCallSrc.length : 'missing');
+  check('F7 兼容模式开关在卡片内且早于提醒规则块', appjs.indexOf('nc-wecom-wechatCompat') > -1 && appjs.indexOf('nc-wecom-wechatCompat') < rulesStart, 'wechatCompat@' + appjs.indexOf('nc-wecom-wechatCompat') + ' rules@' + rulesStart);
+  check('F8 旧的外部兼容模式容器已移除', !appjs.includes('notify-rules" style="margin-top:-8px"'), '');
 
   upstream.close();
   try { fs.rmSync(process.env.DATA_DIR, { recursive: true, force: true }); } catch (e) {}
