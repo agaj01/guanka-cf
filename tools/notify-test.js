@@ -1,5 +1,5 @@
 'use strict';
-/* 提醒功能验证：本地 mock 服务接收四通道请求，校验 payload；再验证提醒规则与去重
+/* 提醒功能验证：本地 mock 服务接收五通道请求，校验 payload；再验证提醒规则与去重
  * 用法: node tools/notify-test.js
  */
 const http = require('http');
@@ -15,6 +15,8 @@ const server = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.url.includes('wxpusher')) res.end(JSON.stringify({ code: 1000, msg: '成功', success: true }));
     else if (req.url.includes('webhook/send')) res.end(JSON.stringify({ errcode: 0, errmsg: 'ok' }));
+    else if (req.url.includes('/gettoken')) res.end(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'MOCK_TOKEN_1', expires_in: 7200 }));
+    else if (req.url.includes('/message/send')) res.end(JSON.stringify({ errcode: 0, errmsg: 'ok', invaliduser: '' }));
     else if (req.url.includes('.send')) res.end(JSON.stringify({ code: 0, message: '', data: {} }));
     else if (req.url.includes('/push')) res.end(JSON.stringify({ code: 200, message: 'success' }));
     else res.end('{}');
@@ -37,6 +39,8 @@ async function main() {
   process.env.NOTIFY_SCT_URL = base + '/sct';
   process.env.NOTIFY_BARK_URL = base + '/bark';
   process.env.NOTIFY_WECOM_URL = base + '/wecom/webhook/send';
+  process.env.NOTIFY_WECOM_APP_TOKEN_URL = base + '/wecomapp/gettoken';
+  process.env.NOTIFY_WECOM_APP_SEND_URL = base + '/wecomapp/message/send';
 
   const cfg = reminder.normalizeConfig({
     enabled: true,
@@ -45,14 +49,16 @@ async function main() {
       serverchan: { enabled: true, sendkey: 'SCT_test' },
       bark: { enabled: true, deviceKey: 'bkkey', server: 'https://api.day.app', level: 'timeSensitive', group: '管卡' },
       wecom: { enabled: true, webhookKey: 'WC_test', summaryPrefix: '管卡提醒' },
+      wecomapp: { enabled: true, corpid: 'CORP_test', corpsecret: 'SEC_test', agentid: '1000002', touser: 'user_a|user_b', summaryPrefix: '管卡提醒' },
     },
   });
 
-  console.log('=== 1. 四通道发送 ===');
+  console.log('=== 1. 五通道发送 ===');
   const res = await notifier.notifyAll(cfg, '年费提醒：测试卡 还有 7 天', '- 银行：测试银行\n- 年费：¥3600');
-  check('四个通道均返回结果', res.length === 4, JSON.stringify(res));
+  check('五个通道均返回结果', res.length === 5, JSON.stringify(res));
   check('四通道全部成功', res.every((r) => r.ok), JSON.stringify(res.filter((r) => !r.ok)));
-  check('mock 收到 4 个请求', received.length === 4, '实际 ' + received.length);
+  // wecomapp 是两段式（gettoken + message/send）→ 5 通道共 6 个请求
+  check('mock 收到 6 个请求', received.length === 6, '实际 ' + received.length);
 
   const wx = received.find((r) => r.url.includes('wxpusher'));
   const sct = received.find((r) => r.url.includes('.send'));
@@ -84,6 +90,19 @@ async function main() {
     check('wecom: content 含前缀与标题', p.markdown.content.includes('管卡提醒｜年费提醒：测试卡 还有 7 天'), p.markdown && p.markdown.content);
     check('wecom: content 含正文', p.markdown.content.includes('测试银行'), p.markdown && p.markdown.content);
   } else check('wecom 请求到达', false);
+  const wca = received.find((r) => r.url.includes('/message/send'));
+  const wcaTok = received.find((r) => r.url.includes('/gettoken'));
+  if (wca) {
+    check('wecomapp: gettoken 先于 message/send', !!wcaTok && received.indexOf(wcaTok) < received.indexOf(wca), JSON.stringify(received.map((x) => x.url)));
+    check('wecomapp: gettoken 携带 corpid/corpsecret', !!wcaTok && wcaTok.url.includes('corpid=CORP_test') && wcaTok.url.includes('corpsecret=SEC_test'), wcaTok && wcaTok.url);
+    check('wecomapp: access_token 在 URL 上', wca.url.includes('access_token=MOCK_TOKEN_1'), wca.url);
+    const p = JSON.parse(wca.body);
+    check('wecomapp: touser 原样透传（| 分隔）', p.touser === 'user_a|user_b', p.touser);
+    check('wecomapp: agentid 数字化', p.agentid === 1000002, String(p.agentid));
+    check('wecomapp: msgtype=markdown', p.msgtype === 'markdown', p.msgtype);
+    check('wecomapp: content 含前缀与标题', p.markdown.content.includes('管卡提醒｜年费提醒：测试卡 还有 7 天'), p.markdown && p.markdown.content);
+    check('wecomapp: content 含正文', p.markdown.content.includes('测试银行'), p.markdown && p.markdown.content);
+  } else check('wecomapp 请求到达', false);
 
   console.log();
   console.log('=== 1.5 wecom content 超长截断（4096 字节上限）===');
@@ -100,18 +119,75 @@ async function main() {
   }
 
   console.log();
+  console.log('=== 1.6 wecomapp：2048 字节截断 + token 缓存 + 失效重取 ===');
+  {
+    // a) 2048 字节截断（自建应用上限比 webhook 的 4096 小一档）
+    const long = '长'.repeat(3000); // 9000 字节 > 2048
+    const rTr = await notifier.CHANNELS.wecomapp.send(
+      { corpid: 'CORP_test', corpsecret: 'SEC_test', agentid: '1000002', touser: '@all', summaryPrefix: '管卡提醒' }, '标题', long);
+    const sendReq = received.filter((x) => x.url.includes('/message/send')).pop();
+    const trunc = JSON.parse(sendReq.body).markdown.content;
+    const buf = Buffer.from(trunc, 'utf8');
+    check('wecomapp: 截断后 content ≤ 2048 字节', buf.length <= 2048, String(buf.length));
+    // 前缀+标题 22B + n×3B ≤ 2048 → n=675 → 2047B：最后一个中文字符装不下即整体丢弃，落在字符边界
+    check('wecomapp: 截断落在字符边界（2047 = 22 + 675×3）', buf.length === 2047 && (buf.length - 22) % 3 === 0, String(buf.length));
+    check('wecomapp: 截断后仍保留前缀与标题', trunc.startsWith('管卡提醒｜标题'), trunc.slice(0, 20));
+    check('wecomapp: @all 透传', JSON.parse(sendReq.body).touser === '@all', sendReq.body.slice(0, 60));
+    check('wecomapp: 截断不影响成功判定', rTr.ok === true, JSON.stringify(rTr));
+
+    // b) token 缓存复用：上面第 1 节 + 截断共发了 2 次消息，gettoken 只应有 1 次
+    const tokCount = received.filter((x) => x.url.includes('/gettoken')).length;
+    check('wecomapp: token 缓存复用（2 次发送仅 1 次取凭证）', tokCount === 1, String(tokCount));
+
+    // c) token 失效重取：mock 下一次 send 返回 42001，再之后恢复正常
+    let badOnce = true;
+    const saved = received.length;
+    server.listeners('request'); // noop（保持引用语义清晰）
+    const origEmit = server.emit.bind(server);
+    server.emit = function (ev, req, res) {
+      if (ev === 'request' && req.url.includes('/message/send') && badOnce) {
+        badOnce = false;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ errcode: 42001, errmsg: 'access_token expired' }));
+        return true;
+      }
+      return origEmit.apply(server, arguments);
+    };
+    const rRetry = await notifier.CHANNELS.wecomapp.send(
+      { corpid: 'CORP_test', corpsecret: 'SEC_test', agentid: '1000002', touser: 'user_a' }, '重取', '正文');
+    server.emit = origEmit;
+    check('wecomapp: token 过期(42001)重取后发送成功', rRetry.ok === true, JSON.stringify(rRetry));
+    const newTokReqs = received.slice(saved).filter((x) => x.url.includes('/gettoken'));
+    check('wecomapp: 失效后重新 gettoken 恰好 1 次', newTokReqs.length === 1, String(newTokReqs.length));
+
+    // d) 缺字段自检：四字段逐一缺失时错误文案正确且不发起任何请求
+    const tokBeforeMissing = received.filter((x) => x.url.includes('/gettoken')).length;
+    const base4 = { corpid: 'C', corpsecret: 'S', agentid: '1', touser: 'u' };
+    const missingCases = [['corpid', '缺少 corpid'], ['corpsecret', '缺少 corpsecret'], ['agentid', '缺少 agentid'], ['touser', '缺少 touser']];
+    for (const [f, want] of missingCases) {
+      const c = Object.assign({}, base4); delete c[f];
+      const r = await notifier.CHANNELS.wecomapp.send(c, 't', 'b');
+      check('wecomapp: 缺 ' + f + ' 报「' + want + '」', r.ok === false && r.error === want, JSON.stringify(r));
+    }
+    const tokAfter = received.filter((x) => x.url.includes('/gettoken')).length;
+    check('wecomapp: 缺字段不发起任何网络请求', tokAfter === tokBeforeMissing, tokBeforeMissing + ' -> ' + tokAfter);
+  }
+
+  console.log();
   console.log('=== 2. 单通道失败不影响其余通道 ===');
   const badCfg = reminder.normalizeConfig({
     channels: {
       wxpusher: { enabled: true, appToken: '', uids: 'UID_a' }, // 缺 token
       serverchan: { enabled: true, sendkey: 'SCT_test' },
       wecom: { enabled: true, webhookKey: '' }, // 缺 webhook Key
+      wecomapp: { enabled: true, corpid: '', corpsecret: '', agentid: '', touser: '' }, // 缺全部四字段
     },
   });
   const r2 = await notifier.notifyAll(badCfg, 't', 'b');
   check('wxpusher 因缺 appToken 失败', r2.find((x) => x.channel === 'wxpusher').ok === false);
   check('serverchan 仍成功', r2.find((x) => x.channel === 'serverchan').ok === true);
   check('wecom 因缺 webhook Key 失败且报错文案正确', (() => { const w = r2.find((x) => x.channel === 'wecom'); return w && w.ok === false && w.error === '缺少 webhook Key'; })(), JSON.stringify(r2.find((x) => x.channel === 'wecom')));
+  check('wecomapp 因缺 corpid 失败且报错文案正确', (() => { const w = r2.find((x) => x.channel === 'wecomapp'); return w && w.ok === false && w.error === '缺少 corpid'; })(), JSON.stringify(r2.find((x) => x.channel === 'wecomapp')));
 
   console.log();
   console.log('=== 2.5 notifyAll 并行 + 输出顺序稳定（PERF-1 回归）===');

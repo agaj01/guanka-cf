@@ -26,6 +26,7 @@ const DEFAULT_CONFIG = {
     serverchan: { enabled: false, sendkey: '' },
     bark: { enabled: false, deviceKey: '', server: 'https://api.day.app', level: 'active', group: '管卡' },
     wecom: { enabled: false, webhookKey: '', summaryPrefix: '管卡提醒' },
+    wecomapp: { enabled: false, corpid: '', corpsecret: '', agentid: '', touser: '', summaryPrefix: '管卡提醒' },
   },
   rules: { feeDays: [30, 7, 1], repayBeforeDays: 3, taskRemainDays: 3, billBeforeDays: 3, billOverdueRemind: 1, assetExpiryDays: 7 },
   sentLog: {},
@@ -73,6 +74,13 @@ function normalizeConfig(raw) {
   if (!bk.server) bk.server = DEFAULT_CONFIG.channels.bark.server;
   const wc = cfg.channels.wecom;
   if (!wc.webhookKey && (ENV && ENV.WECOM_WEBHOOK_KEY)) wc.webhookKey = (ENV && ENV.WECOM_WEBHOOK_KEY);
+  const wca = cfg.channels.wecomapp;
+  if (wca) {
+    if (!wca.corpid && (ENV && ENV.WECOM_APP_CORPID)) wca.corpid = (ENV && ENV.WECOM_APP_CORPID);
+    if (!wca.corpsecret && (ENV && ENV.WECOM_APP_CORPSECRET)) wca.corpsecret = (ENV && ENV.WECOM_APP_CORPSECRET);
+    if (!wca.agentid && (ENV && ENV.WECOM_APP_AGENTID)) wca.agentid = (ENV && ENV.WECOM_APP_AGENTID);
+    if (!wca.touser && (ENV && ENV.WECOM_APP_TOUSER)) wca.touser = (ENV && ENV.WECOM_APP_TOUSER);
+  }
   return cfg;
 }
 

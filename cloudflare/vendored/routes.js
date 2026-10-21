@@ -12,7 +12,7 @@ const A = require('./assets');
 // 版本号单一事实来源：根 package.json（启动加载一次）。
 // 页脚「管卡 vX.Y.Z」来自 /api/health，此前版本号在 health 与 package.json
 // 双写，发版只改一边就会脱节（页脚显示旧版）。
-const APP_VERSION = '1.2.3'; // vendor 构建期自 package.json 注入
+const APP_VERSION = '1.2.4'; // vendor 构建期自 package.json 注入
 
 // 账单流水（月账单 + 是否已还）
 function getBills() { return store.readArray('bills'); }
@@ -58,6 +58,7 @@ const NOTIFY_SECRET_FIELDS = {
   serverchan: ['sendkey'],
   bark: ['deviceKey'],
   wecom: ['webhookKey'],
+  wecomapp: ['corpsecret'],
 };
 const MASK_PREFIX = '••••';
 

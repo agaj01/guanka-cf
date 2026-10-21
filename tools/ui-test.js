@@ -510,6 +510,11 @@ async function main() {
     body: JSON.stringify({ brand: 'UI测试商家', name: 'UI测试券', type: 'coupon', totalUses: 3 }),
   }).then((r) => r.json()).catch(() => null);
   if (created && created.id) {
+    // 裸 API 造券绕过了前端保存流程里的 loadAll()，state.vouchers 还是启动时快照；
+    // 切页前重放一次启动流程刷新数据，否则 renderVouchers 渲染的是空列表（与被测的前端逻辑无关）。
+    // app.js 是 'use strict' + 函数声明，w.eval('loadAll()') 拿不到词法作用域 → 直接重新 eval 全量脚本
+    w.eval(appJs);
+    await sleep(500);
     const vouNav = $('.nav-item[data-page="vouchers"]');
     vouNav.click();
     await sleep(300);

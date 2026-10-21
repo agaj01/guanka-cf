@@ -1158,6 +1158,8 @@ function notifyModalHtml(cfg) {
       [['deviceKey', 'deviceKey', 'password', ''], ['server', '服务器地址', 'text', 'https://api.day.app'], ['level', '推送级别', 'text', 'active'], ['group', '分组', 'text', '管卡']]) +
     ch('wecom', '企业微信消息推送', '企业微信「消息推送」（原群机器人）：群聊右上角 →消息推送→ 添加/查看 → 复制 Webhook 地址的 key 参数',
       [['webhookKey', 'Webhook Key', 'password', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
+    ch('wecomapp', '企业微信自建应用', '消息直达成员会话：管理后台「我的企业」复制 corpid；应用管理→自建应用创建后取 agentid 与 Secret；收件人填成员账号（多个用 | 分隔，@all 全员）',
+      [['corpid', 'corpid（企业ID）', 'text', ''], ['corpsecret', 'Secret', 'password', ''], ['agentid', 'AgentId', 'text', '1000002'], ['touser', '收件人账号', 'text', '@all'], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
     '<div class="notify-rules"><h4>提醒规则</h4><div class="form-grid">' +
     field('年费提前提醒天数（逗号分隔）', '<input id="n-feeDays" value="' + esc((cfg.rules.feeDays || []).join(',')) + '" placeholder="30,7,1">') +
     field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +
@@ -1213,6 +1215,7 @@ async function openNotifyModal() {
       serverchan: { enabled: $n('nc-serverchan-enabled').checked, sendkey: $n('nc-serverchan-sendkey').value.trim() },
       bark: { enabled: $n('nc-bark-enabled').checked, deviceKey: $n('nc-bark-deviceKey').value.trim(), server: $n('nc-bark-server').value.trim(), level: $n('nc-bark-level').value.trim(), group: $n('nc-bark-group').value.trim() },
       wecom: { enabled: $n('nc-wecom-enabled').checked, webhookKey: $n('nc-wecom-webhookKey').value.trim(), summaryPrefix: $n('nc-wecom-summaryPrefix').value.trim() },
+      wecomapp: { enabled: $n('nc-wecomapp-enabled').checked, corpid: $n('nc-wecomapp-corpid').value.trim(), corpsecret: $n('nc-wecomapp-corpsecret').value.trim(), agentid: $n('nc-wecomapp-agentid').value.trim(), touser: $n('nc-wecomapp-touser').value.trim(), summaryPrefix: $n('nc-wecomapp-summaryPrefix').value.trim() },
     },
     rules: {
       feeDays: String($n('n-feeDays').value).split(/[,，\s]+/).map(Number).filter((x) => isFinite(x) && x >= 0),

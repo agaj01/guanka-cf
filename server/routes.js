@@ -59,6 +59,7 @@ const NOTIFY_SECRET_FIELDS = {
   serverchan: ['sendkey'],
   bark: ['deviceKey'],
   wecom: ['webhookKey'],
+  wecomapp: ['corpsecret'],
 };
 const MASK_PREFIX = '••••';
 
