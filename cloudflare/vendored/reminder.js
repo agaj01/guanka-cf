@@ -25,8 +25,7 @@ const DEFAULT_CONFIG = {
     wxpusher: { enabled: false, appToken: '', uids: '', topicIds: '', summaryPrefix: '管卡提醒' },
     serverchan: { enabled: false, sendkey: '' },
     bark: { enabled: false, deviceKey: '', server: 'https://api.day.app', level: 'active', group: '管卡' },
-    wecom: { enabled: false, webhookKey: '', summaryPrefix: '管卡提醒' },
-    wecomapp: { enabled: false, corpid: '', corpsecret: '', agentid: '', touser: '', summaryPrefix: '管卡提醒' },
+    wecom: { enabled: false, webhookKey: '', summaryPrefix: '管卡提醒', wechatCompat: false },
   },
   rules: { feeDays: [30, 7, 1], repayBeforeDays: 3, taskRemainDays: 3, billBeforeDays: 3, billOverdueRemind: 1, assetExpiryDays: 7 },
   sentLog: {},
@@ -43,8 +42,10 @@ function normalizeConfig(raw) {
     for (const k of Object.keys(cfg.channels)) {
       const src = r.channels[k] || {};
       cfg.channels[k].enabled = !!src.enabled;
+      // wechatCompat 是布尔开关（其余字段均为字符串）；normalizeConfig 统一按字符串处理通道字段
       for (const f of Object.keys(src)) {
         if (f === 'enabled') continue;
+        if (f === 'wechatCompat') { cfg.channels[k][f] = !!src[f]; continue; }
         cfg.channels[k][f] = String(src[f] === undefined ? (cfg.channels[k][f] || '') : src[f]);
       }
     }
@@ -74,13 +75,6 @@ function normalizeConfig(raw) {
   if (!bk.server) bk.server = DEFAULT_CONFIG.channels.bark.server;
   const wc = cfg.channels.wecom;
   if (!wc.webhookKey && (ENV && ENV.WECOM_WEBHOOK_KEY)) wc.webhookKey = (ENV && ENV.WECOM_WEBHOOK_KEY);
-  const wca = cfg.channels.wecomapp;
-  if (wca) {
-    if (!wca.corpid && (ENV && ENV.WECOM_APP_CORPID)) wca.corpid = (ENV && ENV.WECOM_APP_CORPID);
-    if (!wca.corpsecret && (ENV && ENV.WECOM_APP_CORPSECRET)) wca.corpsecret = (ENV && ENV.WECOM_APP_CORPSECRET);
-    if (!wca.agentid && (ENV && ENV.WECOM_APP_AGENTID)) wca.agentid = (ENV && ENV.WECOM_APP_AGENTID);
-    if (!wca.touser && (ENV && ENV.WECOM_APP_TOUSER)) wca.touser = (ENV && ENV.WECOM_APP_TOUSER);
-  }
   return cfg;
 }
 

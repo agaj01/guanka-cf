@@ -152,6 +152,7 @@ async function sendBark(env, cfg, title, content) {
 // POST https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<KEY>
 // {msgtype:'markdown', markdown:{content}}；成功判定 {errcode:0, errmsg:'ok'}
 const WECOM_CONTENT_MAX_BYTES = 4096; // 企业微信 markdown content 长度上限（UTF-8 字节）
+const WECOM_TEXT_MAX_BYTES = 2048;    // 微信兼容模式发 text 消息，上限小一档
 const UTF8 = new TextEncoder();       // Workers 无 Buffer，用 TextEncoder 算字节数
 
 /** 按 UTF-8 字节数截断字符串（逐码点累计，不撕裂多字节字符；与 Node 版同语义） */
@@ -171,11 +172,34 @@ function utf8Slice(str, maxBytes) {
   return s.slice(0, end);
 }
 
+/** 微信兼容模式：markdown → 纯文本（微信插件端不支持渲染 markdown 消息，与 Node 版同语义） */
+function markdownToText(md) {
+  return String(md || '')
+    .split('\n')
+    .map((line) => line.replace(/^>\s?/, '').replace(/^\s*[-*]\s+\[ \]\s*/, '□ ').replace(/^\s*[-*]\s+/, '· ').replace(/^\s*\d+\.\s+/, (m) => m))
+    .join('\n')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/<[^>]+>/g, '');
+}
+
 async function sendWecom(env, cfg, title, content) {
   if (!cfg.webhookKey) return { ok: false, error: '缺少 webhook Key' };
   const base = endpoint(env, 'NOTIFY_WECOM_URL', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send');
   const url = base + (base.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(String(cfg.webhookKey).trim());
   const text = String(cfg.summaryPrefix || '管卡提醒') + '｜' + title + '\n' + content;
+  // 微信兼容模式（wechatCompat）：发 text 纯文本，微信插件端可正常显示
+  if (cfg.wechatCompat) {
+    const r = await postJson(url, {
+      msgtype: 'text',
+      text: { content: utf8Slice(markdownToText(text), WECOM_TEXT_MAX_BYTES) },
+    });
+    if (!r.ok) return r;
+    return verdict(r, 0, '企业微信', 'errmsg', 'errcode');
+  }
   const r = await postJson(url, {
     msgtype: 'markdown',
     markdown: { content: utf8Slice(text, WECOM_CONTENT_MAX_BYTES) },
@@ -185,85 +209,11 @@ async function sendWecom(env, cfg, title, content) {
   return verdict(r, 0, '企业微信', 'errmsg', 'errcode');
 }
 
-// ---------------- 企业微信应用消息 (wecomapp)（语义与 server/notifier.js 一致）----------------
-// 官方「发送应用消息」接口（文档 90236）：两段式 GET gettoken（7200s TTL，全局缓存）→
-// POST message/send；token 失效（40014/42001）清缓存重取一次；markdown content 上限 2048 字节。
-// 注意：新建自建应用须配置「企业可信IP」（60020）；Workers 出站 IP 不固定，直连会报 60020，
-// 可用 NOTIFY_WECOM_APP_*_URL 环境变量指向固定 IP 代理。端点固定 → 无 SSRF 面。
-const WECOM_APP_CONTENT_MAX_BYTES = 2048;
-const WECOM_APP_TOKEN_RETRY_CODES = [40014, 42001];
-
-/** access_token isolate 级缓存：DO 重启/isolate 回收后丢失即重取（低频推送远低于每日取 token 上限） */
-const wecomAppTokens = new Map();
-const WECOM_APP_TOKEN_MARGIN_MS = 60 * 1000;
-
-async function getJson(url) {
-  const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(TIMEOUT_MS) });
-  const text = await res.text();
-  let data = null;
-  try { data = JSON.parse(text); } catch (e) { /* 非 JSON 响应 */ }
-  if (!res.ok) return { ok: false, error: 'HTTP ' + res.status + ' ' + text.slice(0, 160) };
-  return { ok: true, data, raw: text.slice(0, 200), contentType: res.headers.get('content-type') || '' };
-}
-
-async function getWecomAppToken(env, corpid, secret) {
-  const ck = corpid + '|' + secret;
-  const hit = wecomAppTokens.get(ck);
-  if (hit && hit.expiresAt > Date.now() + WECOM_APP_TOKEN_MARGIN_MS) return { ok: true, token: hit.token };
-  const base = endpoint(env, 'NOTIFY_WECOM_APP_TOKEN_URL', 'https://qyapi.weixin.qq.com/cgi-bin/gettoken');
-  const url = base + (base.includes('?') ? '&' : '?') + 'corpid=' + encodeURIComponent(corpid) + '&corpsecret=' + encodeURIComponent(secret);
-  const r = await getJson(url);
-  if (!r.ok) return r;
-  const v = verdict(r, 0, '企业微信应用消息(凭证)', 'errmsg', 'errcode');
-  if (!v.ok) return v;
-  if (!r.data.access_token) return { ok: false, error: '企业微信应用消息(凭证)响应缺少 access_token 字段' };
-  const token = String(r.data.access_token);
-  wecomAppTokens.set(ck, { token, expiresAt: Date.now() + (Number(r.data.expires_in) || 7200) * 1000 });
-  return { ok: true, token };
-}
-
-function invalidateWecomAppToken(corpid, secret) {
-  wecomAppTokens.delete(corpid + '|' + secret);
-}
-
-async function sendWecomApp(env, cfg, title, content) {
-  const corpid = String(cfg.corpid || '').trim();
-  const secret = String(cfg.corpsecret || '').trim();
-  const agentid = String(cfg.agentid || '').trim();
-  const touser = String(cfg.touser || '').trim();
-  if (!corpid) return { ok: false, error: '缺少 corpid' };
-  if (!secret) return { ok: false, error: '缺少 corpsecret' };
-  if (!agentid) return { ok: false, error: '缺少 agentid' };
-  if (!touser) return { ok: false, error: '缺少 touser' };
-  const text = String(cfg.summaryPrefix || '管卡提醒') + '｜' + title + '\n' + content;
-  const aid = Number(agentid);
-  const payload = {
-    touser,
-    msgtype: 'markdown',
-    agentid: Number.isFinite(aid) && String(aid) === agentid ? aid : agentid,
-    markdown: { content: utf8Slice(text, WECOM_APP_CONTENT_MAX_BYTES) },
-  };
-  const sendBase = endpoint(env, 'NOTIFY_WECOM_APP_SEND_URL', 'https://qyapi.weixin.qq.com/cgi-bin/message/send');
-  const attempt = async () => {
-    const t = await getWecomAppToken(env, corpid, secret);
-    if (!t.ok) return t;
-    return postJson(sendBase + (sendBase.includes('?') ? '&' : '?') + 'access_token=' + encodeURIComponent(t.token), payload);
-  };
-  let r = await attempt();
-  if (r.ok && r.data && WECOM_APP_TOKEN_RETRY_CODES.includes(r.data.errcode)) {
-    invalidateWecomAppToken(corpid, secret);
-    r = await attempt();
-  }
-  if (!r.ok) return r;
-  return verdict(r, 0, '企业微信应用消息', 'errmsg', 'errcode');
-}
-
 const CHANNELS = {
   wxpusher: { label: 'WxPusher', send: sendWxpusher },
   serverchan: { label: 'Server酱³', send: sendServerChan },
   bark: { label: 'Bark', send: sendBark },
   wecom: { label: '企业微信', send: sendWecom },
-  wecomapp: { label: '企业微信应用消息', send: sendWecomApp },
 };
 
 /** 向所有已启用通道推送（env 首参，语义对齐 notifier.notifyAll）
@@ -292,4 +242,4 @@ function enabledChannels(cfg) {
   return Object.keys(CHANNELS).filter((k) => cfg && cfg.channels && cfg.channels[k] && cfg.channels[k].enabled);
 }
 
-module.exports = { notifyAll, enabledChannels, CHANNELS, assertSafeBarkServer, isBlockedIp, _wecomAppTokens: wecomAppTokens };
+module.exports = { notifyAll, enabledChannels, CHANNELS, assertSafeBarkServer, isBlockedIp, markdownToText };

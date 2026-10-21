@@ -199,6 +199,25 @@ async function sendBark(cfg, title, content) {
 // POST https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<KEY>
 // {msgtype:'markdown', markdown:{content}}；成功判定 {errcode:0, errmsg:'ok'}
 const WECOM_CONTENT_MAX_BYTES = 4096; // 企业微信 markdown content 长度上限（UTF-8 字节）
+const WECOM_TEXT_MAX_BYTES = 2048;    // 微信兼容模式发 text 消息，上限小一档
+
+/** 微信兼容模式：markdown → 纯文本。
+ * 背景：群机器人 markdown 消息在「微信插件」（微信里收企微消息）端显示
+ * 「暂不支持此消息类型，请在企业微信中查看」（官方确认限制，见开发者社区 16466241302900087783）。
+ * text 类型微信端可正常显示。剥离方式：先处理行首语法（引用块/列表/待办），
+ * 再剥星号、下划线、波浪线、反引号等行内标记，保留换行结构（换行有语义：列表项）。 */
+function markdownToText(md) {
+  return String(md || '')
+    .split('\n')
+    .map((line) => line.replace(/^>\s?/, '').replace(/^\s*[-*]\s+\[ \]\s*/, '□ ').replace(/^\s*[-*]\s+/, '· ').replace(/^\s*\d+\.\s+/, (m) => m))
+    .join('\n')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/<[^>]+>/g, '');
+}
 
 /** 按 UTF-8 字节数截断字符串（逐码点累计，不撕裂多字节字符） */
 function utf8Slice(str, maxBytes) {
@@ -222,6 +241,15 @@ async function sendWecom(cfg, title, content) {
   const base = endpoint('NOTIFY_WECOM_URL', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send');
   const url = base + (base.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(String(cfg.webhookKey).trim());
   const text = String(cfg.summaryPrefix || '管卡提醒') + '｜' + title + '\n' + content;
+  // 微信兼容模式（wechatCompat）：发 text 纯文本，微信插件端可正常显示（markdown 会被微信端拒显）
+  if (cfg.wechatCompat) {
+    const r = await postJson(url, {
+      msgtype: 'text',
+      text: { content: utf8Slice(markdownToText(text), WECOM_TEXT_MAX_BYTES) },
+    });
+    if (!r.ok) return r;
+    return verdict(r, 0, '企业微信', 'errmsg', 'errcode');
+  }
   const r = await postJson(url, {
     msgtype: 'markdown',
     markdown: { content: utf8Slice(text, WECOM_CONTENT_MAX_BYTES) },
@@ -231,100 +259,11 @@ async function sendWecom(cfg, title, content) {
   return verdict(r, 0, '企业微信', 'errmsg', 'errcode');
 }
 
-// ---------------- 企业微信应用消息 (wecomapp) ----------------
-// 官方「发送应用消息」接口（文档 90236），与 wecom（群机器人 webhook）并行：
-// 消息直达应用可见范围内成员的会话（非群聊）。
-// 两段式：GET /cgi-bin/gettoken 拿 access_token（7200s TTL，有每日获取次数上限 → 必须全局缓存），
-//         POST /cgi-bin/message/send 下发消息；成功判定 errcode==0（与 webhook 相同）。
-// token 失效（40014 invalid access_token / 42001 access_token expired）清缓存重取一次再发。
-// markdown content 上限 2048 字节——比 webhook 通道的 4096 小一档，注意区分。
-// 注意：新建自建应用须在应用详情配置「企业可信IP」（60020 = 调用方 IP 不在白名单；
-// Cloudflare Workers 出站 IP 不固定，直连会报 60020，可用 NOTIFY_WECOM_APP_*_URL 指向固定 IP 代理）。
-// 端点固定 qyapi.weixin.qq.com，无用户可控服务器地址 → 无 SSRF 面（Bark 通道那套校验不适用）。
-const WECOM_APP_CONTENT_MAX_BYTES = 2048;
-const WECOM_APP_TOKEN_RETRY_CODES = [40014, 42001];
-
-/** access_token 进程级缓存：key=corpid|secret（token 由二者决定），value={token, expiresAt}。
- * 仅内存态：Node 版随进程存活；Workers 版随 isolate 存活，重启丢失即重取。
- * 7200s TTL + 提醒推送低频，远低于官方每日取 token 次数上限。 */
-const wecomAppTokens = new Map();
-const WECOM_APP_TOKEN_MARGIN_MS = 60 * 1000; // 提前 60s 视为过期，避免边界时刻拿到刚失效的旧 token
-
-async function getJson(url) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: ctrl.signal });
-    const text = await res.text();
-    let data = null;
-    try { data = JSON.parse(text); } catch (e) { /* 非 JSON 响应 */ }
-    if (!res.ok) return { ok: false, error: 'HTTP ' + res.status + ' ' + text.slice(0, 160) };
-    return { ok: true, data, raw: text.slice(0, 200), contentType: res.headers.get('content-type') || '' };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** 取自建应用 access_token：命中缓存直接返回；否则请求 gettoken 并落缓存 */
-async function getWecomAppToken(corpid, secret) {
-  const ck = corpid + '|' + secret;
-  const hit = wecomAppTokens.get(ck);
-  if (hit && hit.expiresAt > Date.now() + WECOM_APP_TOKEN_MARGIN_MS) return { ok: true, token: hit.token };
-  const base = endpoint('NOTIFY_WECOM_APP_TOKEN_URL', 'https://qyapi.weixin.qq.com/cgi-bin/gettoken');
-  const url = base + (base.includes('?') ? '&' : '?') + 'corpid=' + encodeURIComponent(corpid) + '&corpsecret=' + encodeURIComponent(secret);
-  const r = await getJson(url);
-  if (!r.ok) return r;
-  const v = verdict(r, 0, '企业微信应用消息(凭证)', 'errmsg', 'errcode');
-  if (!v.ok) return v;
-  if (!r.data.access_token) return { ok: false, error: '企业微信应用消息(凭证)响应缺少 access_token 字段' };
-  const token = String(r.data.access_token);
-  wecomAppTokens.set(ck, { token, expiresAt: Date.now() + (Number(r.data.expires_in) || 7200) * 1000 });
-  return { ok: true, token };
-}
-
-function invalidateWecomAppToken(corpid, secret) {
-  wecomAppTokens.delete(corpid + '|' + secret);
-}
-
-async function sendWecomApp(cfg, title, content) {
-  const corpid = String(cfg.corpid || '').trim();
-  const secret = String(cfg.corpsecret || '').trim();
-  const agentid = String(cfg.agentid || '').trim();
-  const touser = String(cfg.touser || '').trim();
-  if (!corpid) return { ok: false, error: '缺少 corpid' };
-  if (!secret) return { ok: false, error: '缺少 corpsecret' };
-  if (!agentid) return { ok: false, error: '缺少 agentid' };
-  if (!touser) return { ok: false, error: '缺少 touser' };
-  const text = String(cfg.summaryPrefix || '管卡提醒') + '｜' + title + '\n' + content;
-  const aid = Number(agentid);
-  const payload = {
-    touser, // 原样透传：支持「|」分隔多账号与 @all（上限 1000 个，超出由上游报错）
-    msgtype: 'markdown',
-    agentid: Number.isFinite(aid) && String(aid) === agentid ? aid : agentid, // 官方要求数字；非纯数字原样传让上游报错
-    markdown: { content: utf8Slice(text, WECOM_APP_CONTENT_MAX_BYTES) },
-  };
-  const sendBase = endpoint('NOTIFY_WECOM_APP_SEND_URL', 'https://qyapi.weixin.qq.com/cgi-bin/message/send');
-  const attempt = async () => {
-    const t = await getWecomAppToken(corpid, secret);
-    if (!t.ok) return t; // 取凭证失败（网络错误 / errcode 非 0），带原错误直接返回
-    return postJson(sendBase + (sendBase.includes('?') ? '&' : '?') + 'access_token=' + encodeURIComponent(t.token), payload);
-  };
-  let r = await attempt();
-  if (r.ok && r.data && WECOM_APP_TOKEN_RETRY_CODES.includes(r.data.errcode)) {
-    invalidateWecomAppToken(corpid, secret);
-    r = await attempt();
-  }
-  if (!r.ok) return r;
-  // errcode=0 且 invaliduser 非空 = 部分账号无效，剩余账号已收到（官方语义仍算成功）
-  return verdict(r, 0, '企业微信应用消息', 'errmsg', 'errcode');
-}
-
 const CHANNELS = {
   wxpusher: { label: 'WxPusher', send: sendWxpusher },
   serverchan: { label: 'Server酱³', send: sendServerChan },
   bark: { label: 'Bark', send: sendBark },
   wecom: { label: '企业微信', send: sendWecom },
-  wecomapp: { label: '企业微信应用消息', send: sendWecomApp },
 };
 
 /** 向所有已启用通道推送；返回 [{channel,label,ok,error}]
@@ -355,4 +294,4 @@ function enabledChannels(cfg) {
   return Object.keys(CHANNELS).filter((k) => cfg && cfg.channels && cfg.channels[k] && cfg.channels[k].enabled);
 }
 
-module.exports = { notifyAll, enabledChannels, CHANNELS, assertSafeBarkServer, isBlockedIp, _wecomAppTokens: wecomAppTokens };
+module.exports = { notifyAll, enabledChannels, CHANNELS, assertSafeBarkServer, isBlockedIp, markdownToText };
