@@ -189,17 +189,33 @@ docker compose up -d
 浏览器首次访问会弹出令牌输入框，登录后凭 HttpOnly 会话 Cookie 免登录（30 天）。
 命令行调用可改用请求头：`curl -H "Authorization: Bearer $AUTH_TOKEN" http://host:3000/api/mycards`。
 
+**反向代理部署**：若应用部署在 nginx/Caddy 等反代之后，**必须**额外设置：
+
+```bash
+# .env 追加两行（TRUST_PROXY 缺 AUTH_TOKEN 时服务拒绝启动，防止静默裸奔）
+AUTH_TOKEN=刚生成的令牌
+TRUST_PROXY=1
+```
+
+- `TRUST_PROXY=1` 后客户端来源按 `X-Forwarded-For` 最左值判定（回环限制、登录限流均生效）；
+  未设置时该头**不参与判定**，客户端可伪造，反代场景下所有请求源地址都是本机，
+  「仅回环」模式会失效——这就是必须成对配置的原因
+- 反代侧请覆写头避免伪造链污染：`proxy_set_header X-Forwarded-For $remote_addr;`
+
 **其它已内置的防护**
 
 | 项 | 说明 |
 |---|---|
 | 端口默认只绑回环 | `docker-compose.yml` 用 `127.0.0.1:3000:3000`，避免 Docker 端口映射对所有网卡放行 |
 | 会话 Cookie | `HttpOnly`（XSS 偷不到）+ `SameSite=Lax`（阻断跨站表单 CSRF）；反代启用 HTTPS 时设 `TRUST_HTTPS=1` 追加 `Secure` |
+| 安全响应头 | 全部响应带 CSP（`script-src 'self'` 等）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: same-origin`，作为 XSS 转义疏漏时的第二道防线 |
+| query token 白名单 | `?token=` 仅对 `GET /api/calendar.ics` 生效（日历客户端带不了 Cookie）；其余 API 只认 Cookie/Bearer，令牌不会进浏览器历史或反代访问日志 |
+| CSV 公式注入消毒 | 导出 CSV 中以 `= + - @` 制表符/回车开头的单元格前置 `'`，防 Excel/WPS 打开时执行公式 |
 | 凭证掩码 | 推送 token 在 API 响应中只回末 4 位；掩码提交视为「不修改」，不会误覆盖 |
-| SSRF 防护 | Bark「服务器地址」必须 https 且不得解析到私有/环回/链路本地/保留网段 |
+| SSRF 防护 | Bark「服务器地址」必须 https 且不得解析到私有/环回/链路本地/保留网段；IP 按**数值**判定（IPv6 各等价写法如 `::ffff:7f00:1` 无法绕过） |
 | 关闭接口 | `POST /api/shutdown` 需鉴权，且拒绝跨站来源 |
 | 登录限速 | 同一 IP 连续 5 次令牌错误则锁定 60 秒 |
-| 请求体上限 | 超过 20MB 返回 **413**（原实现直接断连，客户端只看到连接重置） |
+| 请求体上限 | 超过 20MB 返回 **413**（原实现直接断连，客户端只看到连接重置）；Workers 版按 `content-length` 预检对齐同上限 |
 | 路径穿越 | 静态文件目录逃逸拦截（带路径分隔符比较），畸形 URL 返回 400 且不影响进程存活 |
 
 ## 性能说明
@@ -292,7 +308,7 @@ DATA_DIR=./data node server/index.js
 | 脚本 | 覆盖范围 | 断言数 |
 |------|---------|--------|
 | `tools/dates-test.js` | 日期引擎：账单/还款日推导、宽限期选期、预警分级、跨年闰日钳制 | 39 |
-| `tools/notify-test.js` | 提醒引擎：四通道推送、去重、年费达标判定、权益生命周期与接口边界、合并账单组、**数据文件类型安全与损坏隔离、sentLog 淘汰**、wecom 微信兼容模式转换 | 170 |
+| `tools/notify-test.js` | 提醒引擎：五通道推送、去重、年费达标判定、权益生命周期与接口边界、合并账单组、**数据文件类型安全与损坏隔离、sentLog 淘汰**、wecom 微信兼容模式转换、**SSRF IPv6 等价写法拦截 / CSV 公式注入消毒 / TRUST_PROXY 与 query token 白名单** | 216 |
 | `tools/backup-test.js` | 备份导出/导入：merge 幂等、replace 全量替换、卡种四元组映射、外键回填、导入上限 | 54 |
 | `tools/qa-wecom-e2e.js` | 企业微信通道端到端：mask 回显、test 推送结构、前端 collect 一致性、卡片 DOM 归属 | 35 |
 | `tools/ui-test.js` | 前端逻辑：页面渲染、抽屉、记一笔、补录、权益超限拦截、编辑持卡、卡种库、主题切换、**合并账单组交互（含成员移出）** | 75 |

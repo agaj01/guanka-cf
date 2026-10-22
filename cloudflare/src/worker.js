@@ -30,6 +30,16 @@ function decodePath(s) {
   try { return decodeURIComponent(s); } catch (e) { return s; }
 }
 
+// 请求体上限：与 Node 版 index.js 的 MAX_BODY(20MB) 对齐。
+// Node 版在流式读取时累计判限；Workers 的 request.arrayBuffer() 无流式钩子，
+// 用 content-length 预检兜底（缺该头时放行——Workers 平台自身有请求体上限）。
+const MAX_BODY = 20 * 1024 * 1024;
+
+function bodyTooLarge(request) {
+  const len = parseInt(request.headers.get('content-length') || '0', 10);
+  return Number.isFinite(len) && len > MAX_BODY;
+}
+
 async function getStub(env) {
   const id = env.GUANKA_DO.idFromName('guanka-singleton');
   return env.GUANKA_DO.get(id);
@@ -85,6 +95,9 @@ export default {
     if (pathname.startsWith('/api/')) {
       const blocked = await auth.guard(request, url, pathname, env);
       if (blocked) return jsonResp(blocked.status, blocked.body);
+      if (bodyTooLarge(request)) {
+        return jsonResp(413, { error: '请求体过大（上限 ' + (MAX_BODY / 1024 / 1024) + 'MB）' });
+      }
 
       const stub = await getStub(env);
       const doReq = new Request('https://do.internal' + url.pathname + url.search, {

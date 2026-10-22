@@ -136,6 +136,7 @@ head -c 32 /dev/urandom | base64
          - "3000:3000"          # 局域网访问：绑所有网卡；想仅本机用改回 "127.0.0.1:3000:3000"
        environment:
          AUTH_TOKEN: ${AUTH_TOKEN:-}   # 必设，见 §3.1；留空则局域网一律 403
+         TRUST_PROXY: ${TRUST_PROXY:-0}   # 反代部署设 1（须与 AUTH_TOKEN 成对，见 §10）
          TRUST_HTTPS: ${TRUST_HTTPS:-0}
        volumes:
          - guanka-data:/app/data
@@ -165,7 +166,7 @@ head -c 32 /dev/urandom | base64
 ```bash
 cd /volume1/docker/credit-card-manager
 
-# 1) 写 .env（把输出粘贴进去）
+# 1) 写 .env（把输出粘贴进去；走反代对外时再追加 TRUST_PROXY=1 一行，见 §10）
 echo "AUTH_TOKEN=$(head -c 32 /dev/urandom | base64)" | sudo tee .env > /dev/null
 
 # 2) 构建并后台启动
@@ -396,7 +397,11 @@ sudo gunzip -c credit-card-manager-1.2.4.tar.gz | sudo docker load
 进一步加固（可选）：
 
 1. 群晖 控制面板 → 安全性 → 开启**自动封锁**（登录失败多次封 IP）
-2. 若要走反向代理 + HTTPS 对外，设置 `TRUST_HTTPS=1`（会话 Cookie 加 `Secure`）
+2. 若要走反向代理 + HTTPS 对外，**必须同时设置** `TRUST_PROXY=1` 和 `TRUST_HTTPS=1`：
+   - `TRUST_PROXY=1` 让应用按 `X-Forwarded-For` 判定客户端来源（缺 `AUTH_TOKEN` 时服务会拒绝启动）
+   - `TRUST_HTTPS=1` 给会话 Cookie 加 `Secure`
+   - 反代侧需覆写头防伪造：nginx 用 `proxy_set_header X-Forwarded-For $remote_addr;`
+     （群晖自带的反向代理门户已自动处理）
 3. 不建议把 3000 端口直接映射到公网；外网访问优先用 Tailscale / WireGuard / SSH 隧道
 4. 定期用 §8.1 做数据备份
 

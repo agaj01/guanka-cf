@@ -796,6 +796,62 @@ async function main() {
   }
 
   console.log();
+  console.log('=== 5.18 SSRF 防护：isBlockedIp IPv6 等价写法（外部审计 H-2 回归）===');
+  {
+    // IPv6 有多种等价写法，字符串匹配拦不住；本组用例为真实审计发现过的绕过路径
+    const blocked = [
+      '::1', '0:0:0:0:0:0:0:1', '::',
+      '::ffff:127.0.0.1', '::ffff:7f00:1', '::FFFF:7F00:0001',   // 回环 hex 写法
+      '::ffff:a9fe:a9fe', '::ffff:169.254.169.254',              // AWS 元数据
+      '::ffff:10.0.0.1', '::ffff:192.168.1.1', '::ffff:172.16.0.1', '::ffff:100.64.0.1',
+      '127.0.0.1', '10.1.2.3', '172.31.9.9', '192.168.0.1', '169.254.169.254',
+      '100.100.1.1', '0.0.0.0', '224.0.0.1', '255.255.255.255',
+      'fd00::1', 'fe80::1', 'FC00::ABCD', 'FEA0::1',
+    ];
+    const allowed = ['8.8.8.8', '1.1.1.1', '9.9.9.9', '::ffff:8.8.8.8',
+      '2606:4700::1111', '2001:db8::1', '172.32.0.1', '100.200.1.1'];
+    for (const ip of blocked) check('SSRF 拦截 ' + ip, notifier.isBlockedIp(ip) === true, String(notifier.isBlockedIp(ip)));
+    for (const ip of allowed) check('SSRF 放行 ' + ip, notifier.isBlockedIp(ip) === false, String(notifier.isBlockedIp(ip)));
+  }
+
+  console.log();
+  console.log('=== 5.19 toCSV 公式注入消毒（外部审计 M-3 回归）===');
+  {
+    const U = require('../server/util');
+    const csv = U.toCSV([['head'], ['=cmd|\'/c calc\'!A1'], ['+sum'], ['-1.5'], ['@x'], ['\tTab'], ['正常文本']]);
+    const body = csv.replace(/^\uFEFF/, '').split('\r\n').slice(1).map((r) => r.replace(/^"?'?/, ''));
+    check('公式前缀 = 被消毒', csv.includes("'=cmd"), body[0]);
+    check('公式前缀 + 被消毒', csv.includes("'+sum"), body[1]);
+    check('公式前缀 - 被消毒', csv.includes("'-1.5"), body[2]);
+    check('公式前缀 @ 被消毒', csv.includes("'@x"), body[3]);
+    check('公式前缀 Tab 被消毒', csv.includes("'\tTab"), body[4]);
+    check('正常文本不受影响', csv.includes('\r\n正常文本'), body[5]);
+    check('引号转义仍正常', U.toCSV([['a"b']]).includes('"a""b"'), U.toCSV([['a"b']]));
+  }
+
+  console.log();
+  console.log('=== 5.20 鉴权辅助：TRUST_PROXY 与 query token 白名单（外部审计 H-1/M-2 回归）===');
+  {
+    const auth = require('../server/auth');
+    // credentialOf：query token 只对 calendar.ics 生效
+    check('query token 普通端点被拒',
+      auth.credentialOf({ headers: {} }, new URL('http://x/api/mycards?token=t1')) === '',
+      auth.credentialOf({ headers: {} }, new URL('http://x/api/mycards?token=t1')));
+    check('query token 日历订阅仍可用',
+      auth.credentialOf({ headers: {} }, new URL('http://x/api/calendar.ics?token=t1')) === 't1',
+      auth.credentialOf({ headers: {} }, new URL('http://x/api/calendar.ics?token=t1')));
+    check('Bearer 头仍优先可用',
+      auth.credentialOf({ headers: { authorization: 'Bearer bt' } }, null) === 'bt',
+      auth.credentialOf({ headers: { authorization: 'Bearer bt' } }, null));
+    // isLoopback + TRUST_PROXY（注意：TRUST_PROXY 在模块加载时固化，这里只测默认路径；
+    // XFF 路径由 e2e 手工验证，此处锁默认语义：无 XFF 信任时按 TCP 源判定）
+    check('默认模式：TCP 源回环放行', auth.isLoopback({ socket: { remoteAddress: '127.0.0.1' }, headers: {} }) === true, '');
+    check('默认模式：XFF 不参与判定（防伪造）',
+      auth.isLoopback({ socket: { remoteAddress: '8.8.8.8' }, headers: { 'x-forwarded-for': '127.0.0.1' } }) === false, '');
+    check('clientIp 默认取 TCP 源', auth.clientIp({ socket: { remoteAddress: '9.9.9.9' }, headers: { 'x-forwarded-for': '1.1.1.1' } }) === '9.9.9.9', auth.clientIp({ socket: { remoteAddress: '9.9.9.9' }, headers: { 'x-forwarded-for': '1.1.1.1' } }));
+  }
+
+  console.log();
   console.log('=== 6. 去重与推送记录 ===');
   const cfg2 = reminder.normalizeConfig({ enabled: true, channels: { bark: { enabled: true, deviceKey: 'bkkey', server: base + '/bark' } } });
   const out1 = await reminder.runChecks(cards, cfg2, notifier, now);

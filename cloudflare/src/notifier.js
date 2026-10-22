@@ -4,32 +4,97 @@
  *
  * 差异点：
  * 1. dns.lookup（Node 内置）不可用 → 改用 Cloudflare DoH（1.1.1.1）解析后校验，
- *    SSRF 防护逻辑（isBlockedIp）与原版逐字节一致。
- * 2. fetch / AbortController / URLSearchParams 均为 Workers 原生支持，无需适配。
+ *    SSRF 防护逻辑（isBlockedIp）与原版逐字节一致。 * 2. fetch / AbortController / URLSearchParams 均为 Workers 原生支持，无需适配。
  * 3. process.env[name] → 由 worker 入口把 env 对象传入 endpoint()。
  */
 
 const TIMEOUT_MS = 10000;
 const DOH_URL = 'https://cloudflare-dns.com/dns-query?name=<HOST>&type=A';
 
-function isBlockedIp(ip) {
-  // IPv4：环回 / 私有 / 链路本地 / 0.0.0.0 / 保留段（与 server/notifier.js 完全一致）
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
-    const p = ip.split('.').map(Number);
-    if (p[0] === 0 || p[0] === 127 || p[0] === 10) return true;
-    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
-    if (p[0] === 192 && p[1] === 168) return true;
-    if (p[0] === 169 && p[1] === 254) return true;
-    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true;  // CGNAT
-    if (p[0] >= 224) return true;                                 // 组播/保留
-    return false;
+/* isBlockedIp：与 server/notifier.js **逐字节一致**（数值化解析，防 IPv6 等价写法绕过）。
+ * 说明见 server/notifier.js 同名函数注释；Workers 无 net 模块，纯 JS 实现两版共用。 */
+
+/** 把 IPv4/IPv6 地址归一化为 8 组 16bit 整数（长度 8 的数组）；非法格式返回 null。
+ *  IPv4 → [a,b,c,d,0,0,0,0]。 */
+function ipToGroups(ip) {
+  const s = String(ip || '').trim().replace(/^\[|\]$/g, '');
+  // IPv4 点分十进制
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
+    const p = s.split('.').map(Number);
+    if (p.some((x) => x > 255)) return null;
+    return [p[0], p[1], p[2], p[3], 0, 0, 0, 0];
   }
-  const low = ip.toLowerCase();
-  if (low === '::1' || low === '::') return true;
-  if (/^f[cd][0-9a-f]{2}:/.test(low)) return true;   // fc00::/7 唯一本地
-  if (/^fe[89ab][0-9a-f]:/.test(low)) return true;   // fe80::/10 链路本地
-  const m = low.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (m) return isBlockedIp(m[1]);
+  // IPv6：处理 :: 缩写；每段 1-4 位十六进制
+  if (!/^[0-9A-Fa-f:.]+$/.test(s)) return null;
+  let head = s, tail = '';
+  const dc = s.indexOf('::');
+  if (dc >= 0) {
+    if (s.indexOf('::', dc + 2) >= 0) return null;  // 多个 :: 不合法
+    head = s.slice(0, dc);
+    tail = s.slice(dc + 2);
+  }
+  const hGroups = head === '' ? [] : head.split(':');
+  const tGroups = tail === '' ? [] : tail.split(':');
+  // 末段内嵌 IPv4（如 ::ffff:127.0.0.1）：拆成 2 组 16bit（推 hex 字符串，
+  // 与后续 parseInt(g, 16) 的解析方式一致）
+  const expandV4 = (arr) => {
+    if (!arr.length || !arr[arr.length - 1].includes('.')) return true;
+    const v4 = ipToGroups(arr.pop());
+    if (!v4) return false;
+    arr.push((v4[0] * 256 + v4[1]).toString(16), (v4[2] * 256 + v4[3]).toString(16));
+    return true;
+  };
+  if (!expandV4(tGroups) || !expandV4(hGroups)) return null;
+  const total = hGroups.length + tGroups.length;
+  if (total > 8) return null;
+  if (dc < 0 && total !== 8) return null;          // 无 :: 时必须恰好 8 段
+  if (dc >= 0 && total === 8) return null;         // :: 不能替代零段（有歧义，拒绝）
+  const zeros = 8 - total;
+  const groups = [...hGroups, ...new Array(zeros).fill('0'), ...tGroups].map((g) => {
+    const n = parseInt(g, 16);
+    return Number.isNaN(n) || g === '' || g.length > 4 || n > 0xffff ? -1 : n;
+  });
+  if (groups.some((n) => n < 0)) return null;
+  return groups;
+}
+
+function isBlockedIp(ip) {
+  const g = ipToGroups(ip);
+  if (!g) {
+    // 解析失败：保守起见按字符串兜底拦掉明显危险前缀（正常调用不会走到这——
+    // 入口只接受 dns 解析结果或 IP 字面量）
+    const low = String(ip || '').toLowerCase();
+    return low === '::1' || low === '::' || /^f[cd][0-9a-f]{2}:/.test(low) || /^fe[89ab][0-9a-f]:/.test(low);
+  }
+  const allZeroPrefix = g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0;
+  // IPv4-mapped（::ffff:0:0/96，前 80bit 为 0、第 81-96bit 为 0xffff）：拆出内嵌 IPv4
+  if (allZeroPrefix && g[5] === 0xffff) {
+    return isBlockedOctets(g[6] * 65536 + g[7]);
+  }
+  // 纯 IPv4 输入（ipToGroups 已拆成前 4 组）
+  if (g[4] === 0 && g[5] === 0 && g[6] === 0 && g[7] === 0 && String(ip).includes('.')) {
+    return isBlockedOctets(g[0] * 16777216 + g[1] * 65536 + g[2] * 256 + g[3]);
+  }
+  // 未指定 :: → 全 0；回环 ::1 → 仅末组为 1
+  if (g.every((x) => x === 0)) return true;
+  if (allZeroPrefix && g[6] === 0 && g[7] === 1) return true;
+  // fc00::/7 唯一本地：g0 ∈ [0xfc00, 0xfdff]（首 7bit 1111110x）
+  if ((g[0] >>> 9) === 0x7e) return true;
+  // fe80::/10 链路本地：g0 ∈ [0xfe80, 0xfebf]（首 10bit 1111111010）
+  if ((g[0] >>> 6) === 0x3fa) return true;
+  return false;
+}
+
+/** IPv4 数值（0..2^32-1）按八位组规则判定 */
+function isBlockedOctets(v4) {
+  const a = Math.floor(v4 / 16777216) & 0xff;
+  const b = Math.floor(v4 / 65536) & 0xff;
+  if (a === 0 || a === 127 || a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;  // CGNAT
+  if (a >= 224) return true;                          // 组播/保留
   return false;
 }
 

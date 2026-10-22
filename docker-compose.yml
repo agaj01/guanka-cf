@@ -15,6 +15,10 @@ services:
       # 不设置时服务只允许本机（回环）访问，局域网/公网一律拒绝。
       # 生成方法：node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
       - AUTH_TOKEN=${AUTH_TOKEN:-}
+      # 部署在可信反向代理（nginx/Caddy 等）之后时设为 1：按 X-Forwarded-For 判定
+      # 客户端来源。必须与 AUTH_TOKEN 同时设置，否则服务拒绝启动（反代场景下
+      # 「仅回环」模式失效，所有外部请求源地址都是本机）。
+      - TRUST_PROXY=${TRUST_PROXY:-0}
       # 若在反向代理上启用了 HTTPS，设为 1 以给会话 Cookie 加上 Secure 属性
       - TRUST_HTTPS=${TRUST_HTTPS:-0}
       # 需要人类可读的缩进 JSON（排查数据问题）时设为 1

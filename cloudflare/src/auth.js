@@ -51,13 +51,20 @@ function parseCookies(req) {
   return out;
 }
 
-/** 请求携带的凭据：Cookie 优先，其次 Bearer，最后 ?token=（日历/导出场景） */
+/** 请求携带的凭据：Cookie 优先，其次 Bearer，最后 ?token=——但**只对白名单端点生效**
+ * （与 Node 版 server/auth.js 对齐：令牌进 URL 会留痕浏览器历史/访问日志/Referer，
+ * 暴露面必须压到最小。前端实际只有日历订阅用 query 传 token）。 */
+const QUERY_TOKEN_PATHS = new Set(['/api/calendar.ics']);
+
 function credentialOf(req, url) {
   const cookies = parseCookies(req);
   if (cookies[COOKIE_NAME]) return cookies[COOKIE_NAME];
   const hdr = req.headers.get('authorization') || '';
   if (hdr.startsWith('Bearer ')) return hdr.slice(7).trim();
-  return (url && url.searchParams.get('token')) || '';
+  if (url && QUERY_TOKEN_PATHS.has(url.pathname)) {
+    return url.searchParams.get('token') || '';
+  }
+  return '';
 }
 
 /**

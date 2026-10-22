@@ -143,9 +143,20 @@ function parseCSV(text) {
   return rows.filter((r) => r.some((f) => String(f).trim() !== ''));
 }
 
+/* CSV 公式注入消毒：以 = + - @ 制表符 回车 开头的单元格会被 Excel/WPS 当公式执行
+ * （如 =cmd|'/c calc'!A1）。字段来源含用户可控文本（银行/名称/别名/备注/权益名称），
+ * 存在「导入恶意备份 → 导出 CSV → 客户机打开」的投毒链。前置单引号强制按文本处理。
+ * 负号在列：单独的负数金额（-123）会被误伤成 '-123——但本表金额列不进 toCSV
+ * （导出字段全是文本/枚举），且 Excel 对 '数字文本 仍可手动去除前缀，安全优先。 */
+function sanitizeCell(f) {
+  if (/^[=+\-@\t\r]/.test(f)) return "'" + f;
+  return f;
+}
+
 function toCSV(rows) {
   const body = rows.map((r) => r.map((f) => {
     f = f == null ? '' : String(f);
+    f = sanitizeCell(f);
     return /[",\n\r]/.test(f) ? '"' + f.replace(/"/g, '""') + '"' : f;
   }).join(',')).join('\r\n');
   return '\uFEFF' + body;

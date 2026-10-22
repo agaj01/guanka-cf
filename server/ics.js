@@ -17,8 +17,8 @@
  * 与原系统「本地时区 YYYY-MM-DD 字符串」的语义一致，无需 VTIMEZONE。
  *
  * 免密访问：/api/calendar.ics?token=<AUTH_TOKEN>——日历客户端无法携带
- * Cookie/Bearer，必须走 URL query token；worker.js 的 credentialOf 与
- * index.js 的 auth.guard 均已支持 ?token=，守卫层零改动。
+ * Cookie/Bearer，必须走 URL query token；credentialOf 已把 ?token= 限定到
+ * 本端点白名单（QUERY_TOKEN_PATHS），其他 API 一律不接受 query 令牌。
  */
 
 const D = require('./dates');

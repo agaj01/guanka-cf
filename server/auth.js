@@ -21,6 +21,12 @@ const TOKEN = String(process.env.AUTH_TOKEN || '');
 const COOKIE_NAME = 'gk_token';
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // 30 天
 
+// 仅当部署在**可信反向代理**之后时才设为 1：此时按 X-Forwarded-For 最左值判断客户端来源
+// （回环判定、登录限流 IP）。不默认信任该头——反代未覆写时客户端可注入伪造值，
+// 等于把「未设令牌仅回环」模式变相对公网打开。TRUST_PROXY=1 必须配合 AUTH_TOKEN，
+// index.js 启动时强制检查（见下方说明与 index.js 的启动拦截）。
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+
 /** 是否已启用鉴权（未配置 token 则走「仅回环」模式，见 isAllowed） */
 function authEnabled() { return TOKEN.length > 0; }
 
@@ -49,19 +55,42 @@ function parseCookies(req) {
   return out;
 }
 
-/** 请求携带的凭据：Cookie 优先，其次 Authorization: Bearer（便于 curl / 脚本调用） */
+/** 请求携带的凭据：Cookie 优先，其次 Authorization: Bearer（便于 curl / 脚本调用），
+ * 最后是查询串兜底——但**只对白名单端点生效**（此前任何端点都吃 ?token=，
+ * 令牌会进浏览器历史/nginx access_log/Referer，暴露面远超设计初衷）。
+ * 前端实际只有日历订阅用 query 传 token（日历客户端带不了 Cookie/自定义头）。 */
+const QUERY_TOKEN_PATHS = new Set(['/api/calendar.ics']);
+
 function credentialOf(req, urlObj) {
   const cookies = parseCookies(req);
   if (cookies[COOKIE_NAME]) return cookies[COOKIE_NAME];
   const hdr = req.headers.authorization || '';
   if (hdr.startsWith('Bearer ')) return hdr.slice(7).trim();
   // 导出是 window.location 跳转，带不了自定义头，允许查询串兜底
-  return urlObj && urlObj.searchParams.get('token') || '';
+  if (urlObj && QUERY_TOKEN_PATHS.has(urlObj.pathname)) {
+    return urlObj.searchParams.get('token') || '';
+  }
+  return '';
+}
+
+/**
+ * 客户端来源 IP：默认取 TCP 层 remoteAddress；TRUST_PROXY=1 时取 XFF 最左一跳
+ * （最左侧才是真实客户端，右侧各级是链路上的代理，可被伪造链污染）。
+ * 反代与本机同宿主部署时，TCP 源地址恒为 127.0.0.1——**不信任 XFF 会导致
+ * 「未设 AUTH_TOKEN 仅回环」模式在反代后形同虚设**（所有外部请求都看起来像本机）。
+ */
+function clientIp(req) {
+  if (TRUST_PROXY) {
+    const xff = String((req.headers && req.headers['x-forwarded-for']) || '');
+    const left = xff.split(',')[0].trim();
+    if (left) return left;
+  }
+  return (req.socket && req.socket.remoteAddress) || '';
 }
 
 /** 判断来源是否为回环地址（未配置 token 时只放行回环） */
 function isLoopback(req) {
-  const ip = (req.socket && req.socket.remoteAddress) || '';
+  const ip = clientIp(req);
   // Node 对 IPv4 回环常表现为 ::ffff:127.0.0.1
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1' ||
     ip.startsWith('127.') || ip.startsWith('::ffff:127.');
@@ -121,5 +150,5 @@ function sameOrigin(req) {
 
 module.exports = {
   authEnabled, checkToken, credentialOf, guard, sessionCookie, clearCookie,
-  sameOrigin, isLoopback, safeEqual, COOKIE_NAME,
+  sameOrigin, isLoopback, safeEqual, clientIp, TRUST_PROXY, COOKIE_NAME,
 };

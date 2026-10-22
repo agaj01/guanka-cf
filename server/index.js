@@ -19,6 +19,17 @@ const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
 const store = new Store(DATA_DIR);
 routes.init(store);
 
+// TRUST_PROXY=1 表示部署在可信反代之后（按 X-Forwarded-For 判定客户端来源）。
+// 反代场景下回环判定依据的是代理转发头而非 TCP 源地址，若此时未设 AUTH_TOKEN，
+// 「仅回环放行」模式实际拦截不到任何外部请求（公网流量经反代进来都带本机源地址），
+// 必须拒绝启动，防止静默降级为公网裸奔。
+if (auth.TRUST_PROXY && !auth.authEnabled()) {
+  console.error('[管卡] 启动被拒绝：TRUST_PROXY=1 要求必须设置 AUTH_TOKEN。' +
+    '反代部署下「未设令牌仅回环」模式无法生效（外部请求经代理进来源地址均为本机）。' +
+    '请设置 AUTH_TOKEN，或去掉 TRUST_PROXY 仅本机直连使用。');
+  process.exit(1);
+}
+
 // 未捕获异常兜底：落盘后退出，由 Docker restart 策略拉起（JSON 原子写入保证数据不坏）
 function crashLog(kind, e) {
   try {
@@ -89,12 +100,12 @@ function serveStatic(req, res, pathname) {
     if (!entry) { send(res, 404, { error: 'Not found' }); return; }
   }
 
-  const headers = {
+  const headers = Object.assign({}, SECURITY_HEADERS, {
     'Content-Type': entry.type,
     'Cache-Control': 'public, max-age=3600',
     'ETag': entry.etag,
     'Vary': 'Accept-Encoding',
-  };
+  });
 
   // 条件请求：内容未变直接 304，省掉整个响应体
   const inm = req.headers['if-none-match'];
@@ -160,11 +171,29 @@ function readBody(req, res) {
   });
 }
 
+/* ---------------- 安全响应头（基线纵深防御） ----------------
+ * 前端 40+ 处 innerHTML，虽绝大多数经 esc() 转义，但任何一处疏漏都会变成可执行
+ * XSS——CSP 是转义失误时的第二道防线。style-src 须带 unsafe-inline（前端大量
+ * 内联 style）；脚本全部外链 app.js 无内联 <script>，script-src 'self' 即可。
+ * X-Frame-Options 阻断点击劫持（shutdown 等敏感操作页面不该被任意站点嵌入）。
+ */
+const SECURITY_HEADERS = {
+  'Content-Security-Policy':
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; " +
+    "base-uri 'none'; form-action 'self'; object-src 'none'",
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'same-origin',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+};
+
 function send(res, status, data, headers) {
   if (res.headersSent) return;
   const isObj = typeof data === 'object' && data !== null && !Buffer.isBuffer(data);
   const payload = isObj ? JSON.stringify(data) : String(data);
-  res.writeHead(status, Object.assign({ 'Content-Type': isObj ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8' }, headers || {}));
+  res.writeHead(status, Object.assign({}, SECURITY_HEADERS,
+    { 'Content-Type': isObj ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8' }, headers || {}));
   res.end(payload);
 }
 
@@ -189,7 +218,9 @@ function noteLoginFail(ip) {
 
 // @returns {true} 已处理；{false} 交给后续路由
 async function handleAuthRoutes(req, res, pathname, urlObj) {
-  const ip = (req.socket && req.socket.remoteAddress) || '?';
+  // 登录限流按「客户端真实来源」计数：反代部署（TRUST_PROXY=1）时必须看 XFF，
+  // 否则所有外部请求都被记到 127.0.0.1 头上，限流互相误伤（且形同共享封禁）
+  const ip = auth.clientIp(req) || '?';
 
   if (pathname === '/api/auth/status') {
     // 只回「是否需要登录 / 当前是否已授权」，不回任何敏感信息
