@@ -607,6 +607,54 @@ async function main() {
   check('删未知组 → 404', (await del8('/api/billgroups/nope')).status === 404);
   check('成员不存在 → 404', (await post8('/api/billgroups', { name: 'zz', memberIds: ['nope', gD.id] })).status === 404);
 
+  // ---- 持久化回归（R-BG1/R-BG2：账单组保存后刷新页面消失）----
+  // 根因：merge 备份导入（云同步每次刷新页面都会触发幂等 merge）时，组存活判定
+  // 只统计「本次导入的新卡」——全 dedup（importedCards=0）时所有现存组被误判为空
+  // 而整体清空，cleanBillGroups 再把成员 billGroupId 一并抹掉。
+  const pg1 = (await mk8(db8[0].id, { alias: '持久甲' })).body;
+  const pg2 = (await mk8(db8[1].id, { alias: '持久乙' })).body;
+  const pgG = (await post8('/api/billgroups', { name: '持久组', memberIds: [pg1.id, pg2.id] })).body;
+  check('持久化前置：建组成功', !!pgG.id, JSON.stringify(pgG));
+  // 模拟刷新页面：绕开内存缓存，新建 Store 实例直接从磁盘读（走真实落盘路径）
+  const store8b = new Store('.notify-test-data8');
+  check('刷新后组仍在（磁盘）', store8b.readArray('billGroups').some((g) => g.id === pgG.id), JSON.stringify(store8b.readArray('billGroups')));
+  check('刷新后成员引用仍在（磁盘）', store8b.readArray('mycards').filter((m) => m.billGroupId === pgG.id).length === 2,
+    JSON.stringify(store8b.readArray('mycards').map((m) => [m.alias, m.billGroupId])));
+
+  // 云同步场景：initCloudSync 在每次 boot 时 merge 导入云端备份。备份与本地卡
+  // 完全相同（全 dedup）且 billGroups 为空（旧备份/未含组）→ 不得清空现存组
+  const backupNoGroups = {
+    schema: 'guanka-backup', version: 2, exportedAt: '2026-01-01T00:00:00.000Z',
+    cardTypes: store8b.readArray('cards'),
+    myCards: [{ id: pg1.id, cardId: pg1.cardId, alias: '持久甲' }, { id: pg2.id, cardId: pg2.cardId, alias: '持久乙' }],
+    consumptions: [], benefitRecords: [], billGroups: [], bills: [],
+  };
+  const mergeWipe = await post8('/api/mycards/import', { data: backupNoGroups, mode: 'merge' });
+  check('幂等 merge 导入成功（卡全 dedup）', mergeWipe.status === 200 && mergeWipe.body.dedupedCards === 2, JSON.stringify(mergeWipe.body).slice(0, 160));
+  const afterMerge = new Store('.notify-test-data8');
+  check('幂等 merge 后组未被误清（R-BG1）', afterMerge.readArray('billGroups').some((g) => g.id === pgG.id), JSON.stringify(afterMerge.readArray('billGroups')));
+  check('幂等 merge 后成员引用未被误清（R-BG1）', afterMerge.readArray('mycards').filter((m) => m.billGroupId === pgG.id).length === 2,
+    JSON.stringify(afterMerge.readArray('mycards').map((m) => [m.alias, m.billGroupId])));
+
+  // 备份含同名组（云同步正常推流后的典型备份）→ 组沿用库内 id 存活、归属不回退
+  const backupWithGroup = Object.assign({}, backupNoGroups, {
+    myCards: [
+      { id: pg1.id, cardId: pg1.cardId, alias: '持久甲', billGroupId: 'bk-grp-x' },
+      { id: pg2.id, cardId: pg2.cardId, alias: '持久乙', billGroupId: 'bk-grp-x' },
+    ],
+    billGroups: [{ id: 'bk-grp-x', name: '持久组', createdAt: '2026-01-01T00:00:00.000Z' }],
+  });
+  const mergeWith = await post8('/api/mycards/import', { data: backupWithGroup, mode: 'merge' });
+  check('含组备份 merge 导入成功', mergeWith.status === 200 && mergeWith.body.billGroups === 1, JSON.stringify(mergeWith.body).slice(0, 160));
+  const afterMerge2 = new Store('.notify-test-data8');
+  check('备份同名组沿用库内 id 存活（R-BG2）', afterMerge2.readArray('billGroups').some((g) => g.id === pgG.id), JSON.stringify(afterMerge2.readArray('billGroups')));
+  check('备份组归属回填正确', afterMerge2.readArray('mycards').filter((m) => m.billGroupId === pgG.id).length === 2,
+    JSON.stringify(afterMerge2.readArray('mycards').map((m) => [m.alias, m.billGroupId])));
+
+  // 清理：解散持久组，恢复 5.13 节收尾空状态
+  await del8('/api/billgroups/' + pgG.id);
+  check('持久组清理后归零', (await get8('/api/billgroups')).body.length === 0);
+
   // 还款节奏一致性判定：10 月恰好同日、换月会错开的组合必须判为不一致
   const S = routes._internals.sameRepaySchedule;
   const F = (v, g) => ({ billingDay: 1, repayMode: 'fixed', repayValue: v, graceDays: g == null ? 3 : g });

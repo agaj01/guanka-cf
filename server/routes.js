@@ -901,7 +901,18 @@ async function handle(method, pathname, url, body, req) {
     // 清理空组：校验后成员不足 2 的组解散。
     // merge 模式：本次导入的卡若被移出组，其原组可能只剩 1 个成员（另一张是库里的旧卡），
     // 此时也该解散——需要按「库中旧卡 + 本次新卡」的合并视图算成员数。
-    const aliveGroups = new Set(safeMyCards.map((m) => m.billGroupId).filter(Boolean));
+    // Bugfix(billGroups) R-BG1：aliveGroups 此前只统计「本次导入的新卡」，而 merge 幂等
+    // 去重（开启云同步后每次刷新页面都会触发：卡全部被 dedupedCards 跳过、
+    // importedCards=0）时 safeMyCards 为空 → 所有现存组被误判为「无成员」→
+    // 下方 store.write('billGroups', finalGroups) 把库里的组整体清空，
+    // 随后 cleanBillGroups() 再把成员的悬空 billGroupId 一并抹掉 ——
+    // 即「账单组保存后刷新页面就消失、之前录入的组也没了」的根因。
+    // 现存卡（含本次被 dedup 跳过的卡）的组归属必须一并计入存活集合。
+    const aliveGroups = new Set();
+    if (mode === 'merge') {
+      for (const m of getMyCards()) { if (m.billGroupId) aliveGroups.add(m.billGroupId); }
+    }
+    for (const m of safeMyCards) { if (m.billGroupId) aliveGroups.add(m.billGroupId); }
     const finalGroups = mode === 'merge'
       ? groups.filter((g) => {
           if (!aliveGroups.has(g.id)) return false;
