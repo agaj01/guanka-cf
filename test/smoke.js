@@ -225,6 +225,75 @@ async function main() {
   ok((await sess.get('sid-old', 'fp-old')) === null, '超过 30 天绝对有效期失效');
   ok(!/fp-old/.test(fs.readFileSync(ROOT + '/src/auth.js', 'utf8')), 'auth.js 不含任何硬编码指纹');
 
+  const authMod = require(ROOT + '/src/auth.js');
+  ok(authMod.authEnabled({}) === false, '无 AUTH_TOKEN 时 authEnabled=false');
+  ok((await authMod.calendarToken({})) === '', '无 AUTH_TOKEN 时日历派生令牌为空（纯 Access 模式不支持日历订阅）');
+  ok((await authMod.calendarToken({ AUTH_TOKEN: 'x'.repeat(40) })).length === 32, '有令牌时派生令牌为 32 字符');
+
+  console.log('== 11. Cloudflare Access 验签（各类绕过）==');
+  const access = require(ROOT + '/src/access.js');
+  const TEAM = 'demo.cloudflareaccess.com';
+  const AUD = 'a'.repeat(64);
+  const cfg = access.accessConfig({ ACCESS_TEAM_DOMAIN: TEAM, ACCESS_AUD: AUD });
+
+  ok(!!cfg && cfg.issuer === 'https://' + TEAM, 'ACCESS_TEAM_DOMAIN + ACCESS_AUD 同时配置才启用');
+  ok(access.accessConfig({ ACCESS_TEAM_DOMAIN: TEAM }) === null, '只配 team 不启用（缺一即禁用）');
+  ok(access.accessConfig({ ACCESS_AUD: AUD }) === null, '只配 aud 不启用');
+  ok(access.accessConfig({ ACCESS_TEAM_DOMAIN: 'https://' + TEAM + '/', ACCESS_AUD: AUD }) !== null, '容错 https:// 前缀与末尾斜杠');
+  ok(access.accessConfig({ ACCESS_TEAM_DOMAIN: 'evil/../x', ACCESS_AUD: AUD }) === null, '非法 team 主机名被拒（防 JWKS 请求被引走）');
+
+  // 用真 RSA 密钥对自签，比 mock 更接近真实链路
+  const kp = await crypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true, ['sign', 'verify']);
+  const pubJwk = await crypto.subtle.exportKey('jwk', kp.publicKey);
+  pubJwk.kid = 'test-kid'; pubJwk.alg = 'RS256'; pubJwk.use = 'sig';
+  access.__setJwksForTest([pubJwk]);
+
+  const b64u = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const nowS = Math.floor(Date.now() / 1000);
+  const basePayload = () => ({
+    iss: 'https://' + TEAM, aud: [AUD], exp: nowS + 300, iat: nowS - 5, nbf: nowS - 5,
+    email: 'u@example.com', sub: 'user-1',
+  });
+  async function makeJwt(headerPatch, payloadPatch) {
+    const h = Object.assign({ alg: 'RS256', kid: 'test-kid', typ: 'JWT' }, headerPatch || {});
+    const p = Object.assign(basePayload(), payloadPatch || {});
+    const data = Buffer.from(b64u(h) + '.' + b64u(p));
+    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', kp.privateKey, data);
+    return data.toString() + '.' + Buffer.from(sig).toString('base64url');
+  }
+
+  const good = await makeJwt();
+  const vGood = await access.verifyJwt(good, cfg);
+  ok(vGood.ok === true, '合法断言通过');
+  ok(access.identityOf(vGood.payload) === 'u@example.com', '能取到 email 作为展示身份');
+
+  ok((await access.verifyJwt(await makeJwt({ alg: 'none' }), cfg)).ok === false, '拒绝 alg=none');
+  ok((await access.verifyJwt(await makeJwt({ alg: 'HS256' }), cfg)).ok === false, '拒绝 alg=HS256（公钥当 HMAC 密钥的绕过）');
+  ok((await access.verifyJwt(await makeJwt({ alg: 'RS256', kid: 'nope' }), cfg)).ok === false, '拒绝未知 kid');
+  ok((await access.verifyJwt(await makeJwt({}, { aud: ['b'.repeat(64)] }), cfg)).ok === false, '拒绝 aud 不匹配（别的应用的合法 JWT）');
+  ok((await access.verifyJwt(await makeJwt({}, { iss: 'https://other.cloudflareaccess.com' }), cfg)).ok === false, '拒绝跨团队 iss');
+  ok((await access.verifyJwt(await makeJwt({}, { exp: nowS - 120 }), cfg)).ok === false, '拒绝已过期断言');
+  ok((await access.verifyJwt(await makeJwt({}, { nbf: nowS + 300 }), cfg)).ok === false, '拒绝尚未生效断言');
+  ok((await access.verifyJwt(await makeJwt({}, { aud: AUD }), cfg)).ok === true, 'aud 为字符串时同样接受');
+  ok((await access.verifyJwt('a.b', cfg)).ok === false, '拒绝结构非法');
+  ok((await access.verifyJwt('', cfg)).ok === false, '拒绝空断言');
+
+  // 签名篡改：改载荷但保留旧签名
+  const parts = good.split('.');
+  const tampered = parts[0] + '.' + Buffer.from(JSON.stringify(Object.assign(basePayload(), { aud: ['b'.repeat(64)] }))).toString('base64url') + '.' + parts[2];
+  ok((await access.verifyJwt(tampered, cfg)).ok === false, '拒绝载荷篡改（签名对不上）');
+
+  // 用另一把私钥签（等同伪造者自己生成密钥对）
+  const kp2 = await crypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true, ['sign', 'verify']);
+  const data2 = Buffer.from(b64u({ alg: 'RS256', kid: 'test-kid', typ: 'JWT' }) + '.' + b64u(basePayload()));
+  const sig2 = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', kp2.privateKey, data2);
+  ok((await access.verifyJwt(data2.toString() + '.' + Buffer.from(sig2).toString('base64url'), cfg)).ok === false,
+    '拒绝他人自签 JWT（无 CF 私钥无法伪造）');
+
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);
 }

@@ -22,6 +22,9 @@
 | 6 | **消费记账** | 记录金额、账单日、账单流水、每月刷卡任务 | **只记消费笔数**，不涉及任何金额与账单；账单接口与账单页整体移除 |
 | 7 | **持卡页排序** | 按名称/年费/还款/银行 | 新增「**年费未达标优先**」（默认）与「**按免息期长**」 |
 | 8 | 请求体上限 | — | 超 20MB 在 Worker 层直接 413，不产生 DO 子请求 |
+| 9 | **Access 集成** | 只建议「前置 Access」，但代码不认识它 —— Access 放行的请求和不放行的请求在应用看来一模一样 | 可选开启**信任模式**：自己验 `Cf-Access-Jwt-Assertion` 的 RS256 签名 + `aud` + `exp`，验过即登录，打开页面不再输令牌 |
+| 10 | 会话与令牌绑定 | 换令牌踢不掉已登录设备 | 会话记录存令牌指纹，轮换 `AUTH_TOKEN` 后旧会话下一次请求即失效 |
+| 11 | 公网入口 | 默认开着 `workers.dev` 与预览 URL（Access 覆盖不到） | 两者默认 `false`，preflight 检查 |
 
 ---
 
@@ -66,7 +69,7 @@ wrangler login
 # 1. 设置访问令牌（这是 secret，不要写进任何文件）
 openssl rand -base64 32 | wrangler secret put AUTH_TOKEN
 
-# 2. 部署（会先跑一遍自检 + 82 项冒烟测试）
+# 2. 部署（会先跑一遍自检 + 104 项冒烟测试）
 npm run deploy
 ```
 
@@ -92,6 +95,9 @@ wrangler secret put AUTH_TOKEN # 粘贴进去，这就是你以后登录用的�
 
 脚本/自动化不必走登录：请求头带 `Authorization: Bearer <AUTH_TOKEN>` 即可，权限等价于网页登录。
 日历订阅用的是另一套派生令牌（界面里「日历订阅」处取），只能读日历、不能写。
+
+**配了 Access 信任模式的话，上面这张表整段可以跳过**：请求带着 Access 签发的 JWT，
+验签通过直接进，不再弹令牌框（详见后文「Access 信任模式」）。
 
 ### 本地开发
 
@@ -135,6 +141,7 @@ routes = [{ pattern = "cards.example.com", custom_domain = true }]
 | 会话与令牌分离 | Cookie 里只有随机 sid，`HttpOnly; Secure; SameSite=Lax`；不含任何可推导主令牌的信息 |
 | 会话表 | 存 DO Storage，30 天**绝对**有效期（`lastSeen` 只用于展示，不延长寿命）；界面里能看到「登录设备」并逐个踢下线 |
 | 会话绑定令牌 | 每条会话记录存签发时主令牌的 SHA-256 指纹；`wrangler secret put AUTH_TOKEN` 换值后，所有旧会话在下一次请求时即被删除 —— 否则「令牌泄露→轮换令牌」等于没做 |
+| Access 断言 | 配了 `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD` 时，每次请求验 `Cf-Access-Jwt-Assertion` 的 RS256 签名 + `aud` + `exp`；无状态，不缓存「已放行」 |
 | 主令牌不认 URL | `?token=<主令牌>` 一律 401 —— 避免进浏览器历史、Referer、CDN 日志 |
 | 日历派生令牌 | `HMAC-SHA256(AUTH_TOKEN, 'guanka-calendar-v1')` 取前 32 字符；只能读 `/api/calendar.ics`，写操作 401 |
 | 恒时比较 | 双 SHA-256 后逐字节异或累积，长度与内容差异都不走时间侧信道 |
@@ -163,8 +170,53 @@ Access 盖不住的四个口子：
 3. **脚本 / API** —— 用 `Authorization: Bearer` 调接口的客户端没有浏览器，走不了 One-time PIN
 4. **Access 自己配错** —— 策略写成 `Everyone`、域名写错、应用被删，Worker 立刻变全公开，而应用层没有任何第二道闸
 
-所以正确的姿势是**两层都留**：Access 挡人，AUTH_TOKEN 挡路径并管理身份。
-真要只留 Access，至少得先改代码去验 `Cf-Access-Jwt-Assertion` 签名（JWKS + aud + exp），否则无法区分"经过 Access 的请求"和"伪造头部的请求"。
+所以默认姿势是**两层都留**：Access 挡人，AUTH_TOKEN 挡路径并管理身份。
+
+真要「只留 Access 也能安全」，前提是在应用层自己验 `Cf-Access-Jwt-Assertion` 签名 ——
+否则无法区分"真的经过 Access"和"自己塞了个头的请求"。这件事本版做完了，见下一节。
+
+### Access 信任模式（打开页面不再输令牌）
+
+同时配置下面两个值即启用，缺一个就整体禁用（不会退化成「只看请求头有没有值」）：
+
+```bash
+# 团队域名：Access → Settings 页面可见，不要带 https://
+# AUD：Access → Access → 你的应用 → Overview 里的 Application Audience (AUD) Tag
+wrangler secret put ACCESS_TEAM_DOMAIN   # 例：yourteam.cloudflareaccess.com
+wrangler secret put ACCESS_AUD           # 64 位十六进制
+
+# 也可以写进 wrangler.toml 的 [vars]（这两个值不是机密，AUD 本来就写在每个 JWT 里）
+```
+
+启用后浏览器请求带 `Cf-Access-Jwt-Assertion`，验签通过即视为已认证，**不再弹令牌框**；
+`AUTH_TOKEN` 退化成纯 API / 日历订阅用途。
+
+设计要点：**无状态**。每个请求都重新验签，应用侧不保存任何「Access 已放行」的凭证 ——
+把人移出白名单后，CF 那边签不出新 JWT，下一次请求立刻失效，不存在「Access 撤了但应用还认」的窗口。
+
+校验项（全部 fail closed）：
+
+| 检查 | 为什么必须查 |
+|---|---|
+| `alg === 'RS256'` | 显式拒绝 `none` 与 `HS256` —— 后者是「拿公开的 JWKS 公钥当 HMAC 密钥自己签一个」的经典绕过 |
+| `aud` 精确匹配 | 否则同团队**其他** Access 应用的合法 JWT 可以拿来登这个应用 |
+| `iss === https://<team>` | 防跨团队重放 |
+| `exp` / `nbf` / `iat` | 留 30s 时钟偏移；过期断言即使签名正确也拒 |
+| JWKS 按 `kid` 取 | 未知 kid 视为可能的密钥轮换，强制重取一次；重取有 60s 最小间隔，防止随机 kid 刷爆 certs 端点 |
+
+**纯 Access 模式**（不配 `AUTH_TOKEN`）是允许的，代价是日历订阅失效
+（日历客户端带不了 JWT，只能靠派生令牌），脚本调用也失去 `Authorization: Bearer` 入口。
+界面里「登录设备」会变成「访问身份」，显示 Access 校验出的邮箱，退出按钮跳 `/cdn-cgi/access/logout`。
+
+排错看日志：
+
+```
+[管卡] Access 信任模式已启用：team=xxx.cloudflareaccess.com，aud=12345678…
+[管卡] Access 断言校验失败：aud 不匹配（检查 ACCESS_AUD 是否为该应用的 Audience Tag）
+[管卡] Access 配置不完整：ACCESS_TEAM_DOMAIN 与 ACCESS_AUD 必须同时设置，当前已忽略
+```
+
+失败告警有 60s 节流，不会因为被刷而灌满日志。
 
 ---
 
@@ -210,7 +262,8 @@ Access 盖不住的四个口子：
 │   ├── worker.js          # 入口：/api/* → DO，其余 → Assets；scheduled → 提醒
 │   ├── do.js              # Durable Object：唯一身份判定点 + 请求分发
 │   ├── session.js         # 会话表 + 指数退避限流（持久化）
-│   ├── auth.js            # 恒时比较 / 会话 Cookie / 日历派生令牌
+│   ├── auth.js            # 恒时比较 / 会话 Cookie / 日历派生令牌 / 令牌指纹
+│   ├── access.js          # Cloudflare Access JWT 验签（RS256 + JWKS 缓存）
 │   ├── token-rules.js     # 令牌强度规则（纯函数，自检与运行期共用）
 │   ├── store.js           # 内存缓存 + DO Storage 持久化
 │   └── time.js            # nowBJ（UTC+8 锚定，前端不依赖本地时区）
@@ -219,7 +272,7 @@ Access 盖不住的四个口子：
 │   ├── reminder.js  ics.js  notifier.js  auth.js
 ├── public/                # 前端 SPA（无框架、无构建）
 ├── scripts/               # preflight.js / check-token.js
-└── test/                  # smoke.js（82 项）/ repro-store.js
+└── test/                  # smoke.js（104 项）/ repro-store.js
 ```
 
 **关于 `biz/`**：这是把上游 `server/*.js` 打补丁后固化的结果，补丁只有三类 ——
@@ -231,7 +284,7 @@ Access 盖不住的四个口子：
 ## 脚本
 
 ```bash
-npm test                 # 82 项冒烟测试（业务层 + 定制点防回归）
+npm test                 # 104 项冒烟测试（业务层 + 定制点防回归）
 npm run preflight        # 部署前自检：配置结构 / 关键文件 / 冒烟 / 令牌提示
 npm run check-token      # 令牌强度体检
 

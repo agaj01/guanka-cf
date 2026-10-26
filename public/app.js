@@ -99,12 +99,24 @@ async function checkAuth() {
   try {
     const st = await api('/api/auth/status');
     const btn = $('#btn-logout');
-    // 服务端必然启用鉴权（未配置令牌时全部 403），登出/会话入口恒显示
+    // 服务端必然启用鉴权（两者都没配时全部 403），登出/会话入口恒显示
     if (btn) btn.style.display = '';
+    state.authVia = st.via || '';
+    state.authEmail = st.email || '';
     // 令牌过弱提示：服务端只在已授权时回传该字段，避免未登录探测
     if (st.weakToken) showWeakTokenBanner(st.weakToken);
+    // Access 模式：请求已经带着边缘签发的 JWT，不需要再弹令牌框
+    if (st.authorized) closeLogin();
     return st;
   } catch (e) { return { authRequired: true, authorized: false }; }
+}
+
+/** 关掉登录层（Access 模式下 boot 时可能已经弹过又不需要了） */
+function closeLogin() {
+  if (!loginShown) return;
+  const root = $('#modal-root');
+  if (root && $('#login-token')) root.innerHTML = '';
+  loginShown = false;
 }
 
 function showWeakTokenBanner(reason) {
@@ -171,6 +183,9 @@ const state = {
   stats: null,
   drawerId: null,
   filter: 'all',
+  // 鉴权态：via = 'access' | 'session' | 'bearer' | ''
+  authVia: '',
+  authEmail: '',
   // 默认排序：年费未达标优先 → 免息期长优先（本项目的主用途）
   sort: 'waiver',
   // 扩展资产（移植自 Benefit Tracker）
@@ -271,6 +286,47 @@ function bindNav() {
 async function openSessionsModal() {
   let data;
   try { data = await api('/api/auth/sessions'); } catch (e) { return toast(e.message, 'error'); }
+
+  // Access 信任模式：身份在边缘，应用侧没有「这台设备」的会话可管
+  if (data.via === 'access') {
+    const others = (data.sessions || []).length;
+    openModal('<div class="modal-title">访问身份</div>',
+      '<div class="nh-item">' +
+      '<span class="badge badge-green">Access</span>' +
+      '<span class="nh-title">' + esc(state.authEmail || '已验证身份') + '</span>' +
+      '<span class="nh-time">由 Cloudflare Access 签发 JWT</span>' +
+      '</div>' +
+      '<div style="font-size:12px;color:var(--text-3);margin-top:10px;line-height:1.7">' +
+      '每次请求都会重新校验 <code>Cf-Access-Jwt-Assertion</code> 的 RS256 签名、<code>aud</code> 与 <code>exp</code>，' +
+      '通过即视为已认证。移出 Access 白名单后下一次请求立刻失效——应用侧不保留任何「已放行」的残留凭证。' +
+      '<br>要退出，需要到 Access 层登出（下面的按钮）。' +
+      (others ? '<br>另外还有 <b>' + others + '</b> 台设备使用 AUTH_TOKEN 登录（脚本或旧会话），可在下方单独下线。' : '') +
+      '</div>' +
+      ((data.sessions || []).length
+        ? '<div class="notify-rules">' + (data.sessions || []).map((s) =>
+          '<div class="nh-item">' +
+          '<span class="badge badge-default">令牌</span>' +
+          '<span class="nh-title">' + esc(s.ua || '未知设备') + '</span>' +
+          '<span class="nh-time">' + esc(s.ip || '') + ' · 最近 ' + esc(String(s.lastSeen || '').slice(0, 16).replace('T', ' ')) + '</span>' +
+          '<button class="btn small danger" data-revoke="' + esc(s.id) + '">下线</button>' +
+          '</div>').join('') + '</div>'
+        : ''),
+      '<button class="btn" data-close>关闭</button>' +
+      '<button class="btn primary" id="sess-access-logout">退出 Access</button>');
+
+    $$('[data-revoke]').forEach((btn) => btn.addEventListener('click', async () => {
+      try {
+        await api('/api/auth/sessions/revoke', { method: 'POST', body: { id: btn.dataset.revoke } });
+        toast('已下线该设备');
+        closeModal();
+        openSessionsModal();
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+    const out = $('#sess-access-logout');
+    if (out) out.addEventListener('click', () => { location.href = '/cdn-cgi/access/logout'; });
+    return;
+  }
+
   const rows = (data.sessions || []).map((s) =>
     '<div class="nh-item">' +
     '<span class="badge ' + (s.current ? 'badge-green' : 'badge-default') + '">' + (s.current ? '本机' : '其他') + '</span>' +

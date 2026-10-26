@@ -43,6 +43,25 @@ crons = ["*/10 * * * *"]
 # 主令牌只用于登录，不会下发到浏览器：登录成功后签发的是一张独立的
 # 随机会话 Cookie，可单独吊销，也可以「全部设备下线」。
 #
+# ── Cloudflare Access 信任模式（可选，开启后打开页面不再输令牌）──
+# 两个值必须**同时**提供，缺一个就整体禁用（不会退化成「只看请求头有没有值」）：
+#   ACCESS_TEAM_DOMAIN = 你的团队域名，形如 yourteam.cloudflareaccess.com
+#                        （在 Access → Settings → 能看到，别带 https://）
+#   ACCESS_AUD         = 该应用的 Application Audience (AUD) Tag
+#                        （Access → Access → 你的应用 → Overview 里那串 64 位十六进制）
+#
+# 这两个都不是机密：AUD 本来就写在每个签发的 JWT 里。所以放 [vars] 也能接受，
+# 想不把它写进仓库就用 secret put。
+#
+# [vars]
+# ACCESS_TEAM_DOMAIN = "yourteam.cloudflareaccess.com"
+# ACCESS_AUD = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#
+# 开启后：浏览器请求带的 Cf-Access-Jwt-Assertion 验签通过即视为已认证，
+# 不再弹令牌框；AUTH_TOKEN 退化为纯 API / 日历订阅用途。
+# 注意 workers.dev 与预览 URL 已在上面关掉——Access 保护不到它们，
+# 那两条路只能靠 AUTH_TOKEN，所以 AUTH_TOKEN 建议保留。
+#
 # 可选：推送端点覆盖
 # [vars]
 # NOTIFY_BARK_URL = "https://api.day.app"

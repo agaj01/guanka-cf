@@ -13,6 +13,7 @@ import { Store } from './store.js';
 import { SessionStore } from './session.js';
 import { nowBJ } from './time.js';
 import auth from './auth.js';
+import access from './access.js';
 import routes from '../biz/routes.js';
 
 // 请求体上限：与上游 Node 版 MAX_BODY(20MB) 对齐
@@ -69,9 +70,30 @@ export class GuankaDO {
     state.blockConcurrencyWhile(async () => {
       await this.store.warmup();
       routes.init(this.store);
-      // 运行期兜底：主令牌强度不足时在日志里明确告警（部署自检会先拦一道）
-      const chk = auth.inspectTokenStrength(auth.masterToken(env));
-      if (!chk.ok) console.warn('[管卡] AUTH_TOKEN 强度不足：' + chk.reason);
+
+      // 运行期兜底：把当前鉴权模式打进日志，配错时（比如 ACCESS_AUD 填成了别的应用）
+      // 第一次真实请求就能看到，不用等到用户报「打不开」
+      const accessCfg = access.accessConfig(env);
+      if (accessCfg) {
+        console.log('[管卡] Access 信任模式已启用：team=' + accessCfg.team
+          + '，aud=' + accessCfg.aud.slice(0, 8) + '…');
+      }
+      // 只是「配了但格式不对」的告警：ACCESS_TEAM_DOMAIN 写了 https:// 前缀之外的怪东西
+      const teamRaw = String((env && env.ACCESS_TEAM_DOMAIN) || '').trim();
+      const audRaw = String((env && env.ACCESS_AUD) || '').trim();
+      if ((teamRaw && !audRaw) || (!teamRaw && audRaw)) {
+        console.warn('[管卡] Access 配置不完整：ACCESS_TEAM_DOMAIN 与 ACCESS_AUD 必须同时设置，当前已忽略');
+      } else if (teamRaw && !accessCfg) {
+        console.warn('[管卡] ACCESS_TEAM_DOMAIN 格式不合法（应形如 yourteam.cloudflareaccess.com），已忽略');
+      }
+
+      if (auth.authEnabled(env)) {
+        // 主令牌强度不足时在日志里明确告警（部署自检会先拦一道）
+        const chk = auth.inspectTokenStrength(auth.masterToken(env));
+        if (!chk.ok) console.warn('[管卡] AUTH_TOKEN 强度不足：' + chk.reason);
+      } else if (!accessCfg) {
+        console.warn('[管卡] 既没有 AUTH_TOKEN 也没有 Access 配置：全部 API 将返回 403');
+      }
     });
     this.ready = true;
   }
@@ -79,14 +101,19 @@ export class GuankaDO {
   /* ================= 身份判定 ================= */
 
   /**
-   * 判定请求身份。接受三种凭证，权限各有边界：
-   * 1. 会话 Cookie（浏览器，唯一能进 UI 的方式）
-   * 2. Bearer <主令牌>（脚本/自动化；等于完全权限，故不进 Cookie）
-   * 3. ?token=<日历派生令牌>（仅 /api/calendar.ics 只读）
+   * 判定请求身份。接受四种凭证，权限各有边界：
+   * 1. Cf-Access-Jwt-Assertion（浏览器，前面挂了 Cloudflare Access 时的主路径）
+   * 2. 会话 Cookie（浏览器，走应用自己的登录框）
+   * 3. Bearer <主令牌>（脚本/自动化；等于完全权限，故不进 Cookie）
+   * 4. ?token=<日历派生令牌>（仅 /api/calendar.ics 只读）
    * 主令牌**不接受**出现在查询串里——避免进浏览器历史/访问日志/Referer。
    */
   async authenticate(request, url, pathname) {
-    if (!auth.authEnabled(this.env)) {
+    const accessCfg = access.accessConfig(this.env);
+    const tokenReady = auth.authEnabled(this.env);
+
+    // 两条路都没配：直接拒绝（不存在「免登录」回退）
+    if (!tokenReady && !accessCfg) {
       return {
         ok: false, status: 403, sid: '',
         body: {
@@ -96,49 +123,114 @@ export class GuankaDO {
       };
     }
 
-    const sid = auth.sidOf(request);
-    if (sid) {
-      const rec = await this.sessions.get(sid, await auth.tokenFingerprint(this.env));
-      if (rec) return { ok: true, sid, rec, via: 'session' };
-    }
-
-    const bearer = auth.bearerOf(request);
-    if (bearer && await auth.checkMasterToken(this.env, bearer)) {
-      return { ok: true, sid: '', via: 'bearer' };
-    }
-
-    if (pathname === '/api/calendar.ics') {
-      const t = url.searchParams.get('token') || '';
-      if (t && await auth.checkCalendarToken(this.env, t)) {
-        return { ok: true, sid: '', via: 'calendar' };
+    // ---- 1. Access 断言：浏览器前面挂 Access 时走这条，验签通过即视为已认证 ----
+    // 注意这是**无状态**判定：Access 会话被撤、邮箱被移出白名单后，JWT 立刻签不出来，
+    // 应用侧不需要也不会保留任何「Access 已放行」的残留凭证。
+    if (accessCfg) {
+      const assertion = request.headers.get('cf-access-jwt-assertion');
+      if (assertion) {
+        const v = await access.verifyJwt(assertion, accessCfg);
+        if (v.ok) {
+          return { ok: true, sid: '', via: 'access', email: access.identityOf(v.payload) };
+        }
+        this.warnAccessFailure(v.reason);
       }
     }
 
-    return { ok: false, status: 401, sid, body: { error: '未授权：请先登录', needAuth: true } };
+    // ---- 2. 会话 Cookie（应用自己的登录框签发；绑定主令牌指纹）----
+    if (tokenReady) {
+      const sid = auth.sidOf(request);
+      if (sid) {
+        const rec = await this.sessions.get(sid, await auth.tokenFingerprint(this.env));
+        if (rec) return { ok: true, sid, rec, via: 'session' };
+      }
+
+      // ---- 3. Bearer 主令牌（脚本自动化）----
+      const bearer = auth.bearerOf(request);
+      if (bearer && await auth.checkMasterToken(this.env, bearer)) {
+        return { ok: true, sid: '', via: 'bearer' };
+      }
+
+      // ---- 4. 日历派生令牌（只读，且只对日历端点生效）----
+      if (pathname === '/api/calendar.ics') {
+        const t = url.searchParams.get('token') || '';
+        if (t && await auth.checkCalendarToken(this.env, t)) {
+          return { ok: true, sid: '', via: 'calendar' };
+        }
+      }
+    }
+
+    return { ok: false, status: 401, sid: '', body: { error: '未授权：请先登录', needAuth: true } };
+  }
+
+  /** Access 校验失败记日志，但有 60s 节流（避免被无效断言刷爆日志） */
+  warnAccessFailure(reason) {
+    const now = Date.now();
+    if (this._accessWarnAt && now - this._accessWarnAt < 60000) return;
+    this._accessWarnAt = now;
+    console.warn('[管卡] Access 断言校验失败：' + reason);
   }
 
   /* ================= 鉴权端点 ================= */
 
   async authStatus(request) {
-    const enabled = auth.authEnabled(this.env);
-    if (!enabled) return resp(200, { authRequired: true, authorized: false, configured: false });
-    const sid = auth.sidOf(request);
-    let authorized = false;
-    if (sid) authorized = !!(await this.sessions.get(sid, await auth.tokenFingerprint(this.env)));
-    if (!authorized) {
-      const bearer = auth.bearerOf(request);
-      if (bearer) authorized = await auth.checkMasterToken(this.env, bearer);
+    const accessCfg = access.accessConfig(this.env);
+    const tokenReady = auth.authEnabled(this.env);
+    if (!tokenReady && !accessCfg) {
+      return resp(200, { authRequired: true, authorized: false, configured: false });
     }
-    const out = { authRequired: true, authorized, configured: true };
-    if (authorized) {
+
+    let authorized = false;
+    let via = '';
+    let email = '';
+    let weakToken = '';
+
+    if (accessCfg) {
+      const assertion = request.headers.get('cf-access-jwt-assertion');
+      if (assertion) {
+        const v = await access.verifyJwt(assertion, accessCfg);
+        if (v.ok) {
+          authorized = true; via = 'access'; email = access.identityOf(v.payload);
+        } else {
+          this.warnAccessFailure(v.reason);
+        }
+      }
+    }
+
+    if (!authorized && tokenReady) {
+      const sid = auth.sidOf(request);
+      if (sid && await this.sessions.get(sid, await auth.tokenFingerprint(this.env))) {
+        authorized = true; via = 'session';
+      }
+      if (!authorized) {
+        const bearer = auth.bearerOf(request);
+        if (bearer && await auth.checkMasterToken(this.env, bearer)) { authorized = true; via = 'bearer'; }
+      }
+    }
+
+    const out = {
+      authRequired: true, authorized, configured: true,
+      via, email,
+      // 前端据此决定「退出」按钮该走 Access 登出还是应用登出
+      accessMode: !!accessCfg,
+      tokenMode: tokenReady,
+    };
+    // 令牌强度只在已授权时回传，避免未登录探测；没配令牌（纯 Access 模式）就没有可提示的
+    if (authorized && tokenReady) {
       const chk = auth.inspectTokenStrength(auth.masterToken(this.env));
-      out.weakToken = chk.ok ? '' : chk.reason; // 仅在已授权时回传，避免未登录探测
+      out.weakToken = chk.ok ? '' : chk.reason;
     }
     return resp(200, out);
   }
 
   async login(request) {
-    if (!auth.authEnabled(this.env)) return resp(400, { error: '服务未设置 AUTH_TOKEN，无法登录' });
+    if (!auth.authEnabled(this.env)) {
+      await drainBody(request);
+      return resp(400, {
+        error: '当前为 Access 信任模式（未配置 AUTH_TOKEN），身份由 Cloudflare Access 管理，无需登录',
+        accessMode: true,
+      });
+    }
 
     const ip = auth.clientIp(request);
     const gate = await this.sessions.gate(ip);
@@ -177,6 +269,14 @@ export class GuankaDO {
 
   async logout(request) {
     await drainBody(request);
+    // Access 模式下身份由边缘持有，应用侧清 Cookie 没有意义：必须去 Access 的登出端点
+    if (!auth.authEnabled(this.env) && access.enabled(this.env)) {
+      return respWith(200, {
+        ok: true, accessMode: true,
+        logoutUrl: '/cdn-cgi/access/logout',
+        msg: '身份由 Cloudflare Access 管理，请通过 Access 登出',
+      }, { 'Set-Cookie': auth.clearCookie() });
+    }
     const sid = auth.sidOf(request);
     if (sid) await this.sessions.revoke(sid);
     return respWith(200, { ok: true }, { 'Set-Cookie': auth.clearCookie() });
@@ -196,7 +296,8 @@ export class GuankaDO {
 
   async listSessions(who) {
     const list = await this.sessions.list(who.sid);
-    return resp(200, { sessions: list });
+    // via=access 时没有应用会话（身份在边缘），前端要据此换成另一种展示
+    return resp(200, { sessions: list, via: who.via || '', accessMode: !auth.authEnabled(this.env) });
   }
 
   async revokeSession(request, who) {
@@ -214,6 +315,15 @@ export class GuankaDO {
   /** 日历订阅地址（派生令牌，可安全交给日历服务） */
   async calendarTokenResp(request) {
     const token = await auth.calendarToken(this.env);
+    if (!token) {
+      // 纯 Access 模式下没有主令牌，派生令牌无从算起。
+      // 这不是漏洞：日历客户端无法携带 Access 的 JWT，只能靠这条独立令牌。
+      return resp(400, {
+        error: '日历订阅需要 AUTH_TOKEN。当前为纯 Access 模式（未配置 AUTH_TOKEN），无法派生只读令牌。'
+          + '如需日历订阅，请 wrangler secret put AUTH_TOKEN 后再来取。',
+        needToken: true,
+      });
+    }
     const origin = new URL(request.url).origin;
     return resp(200, {
       token,
@@ -271,7 +381,10 @@ export class GuankaDO {
     if (pathname === '/api/auth/calendar-token' && method === 'GET') return this.calendarTokenResp(request);
 
     // ---- 业务 API（写请求做同源校验，挡 CSRF）----
-    if (method !== 'GET' && method !== 'HEAD' && who.via === 'session' && !auth.sameOrigin(request)) {
+    // Access 模式同样要查：JWT 证明「是谁」，不证明「这个请求是不是本人点的」。
+    if (method !== 'GET' && method !== 'HEAD'
+        && (who.via === 'session' || who.via === 'access')
+        && !auth.sameOrigin(request)) {
       await drainBody(request);
       return resp(403, { error: '跨站请求被拒绝' });
     }
