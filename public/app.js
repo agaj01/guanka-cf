@@ -1314,7 +1314,7 @@ function notifyModalHtml(cfg) {
     '<div class="form-grid nc-body">' + fields.map((f) => field(f[1], '<input id="nc-' + key + '-' + f[0] + '"' + (f[2] === 'password' ? ' type="password"' : (f[2] === 'number' ? ' type="number"' : '')) + ' placeholder="' + esc(f[3] || '') + '" value="' + esc((c[key] && c[key][f[0]]) != null ? String(c[key][f[0]]) : '') + '">')).join('') + (extraHtml || '') + '</div></div>';
 
   return (
-    '<label class="switch-row"><input type="checkbox" id="n-enabled"' + (cfg.enabled ? ' checked' : '') + '> <b>启用提醒</b>（由 Workers Cron 每 10 分钟触发，下次检查在到达「检查间隔」后执行）</label>' +
+    '<label class="switch-row"><input type="checkbox" id="n-enabled"' + (cfg.enabled ? ' checked' : '') + '> <b>启用提醒</b>（由 Workers Cron <b>每天 09:00（北京时间）</b>触发一次，一轮把当天所有待提醒项推完）</label>' +
     ch('wxpusher', 'WxPusher', '微信推送：wxpusher 后台获取 appToken，UID 为接收用户',
       [['appToken', 'appToken', 'password', 'AT_xxx'], ['uids', 'UID（多个用逗号分隔）', 'text', 'UID_xxx'], ['topicIds', '主题ID（可选）', 'text', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
     ch('serverchan', 'Server酱³', '微信/多端推送：sct.ftqq.com 获取 SendKey（SCT/SCU 开头）',
@@ -1330,7 +1330,7 @@ function notifyModalHtml(cfg) {
     field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +
     field('月任务月末提醒天数（0=关闭）', '<input id="n-taskDays" type="number" min="0" value="' + esc(cfg.rules.taskRemainDays) + '">') +
     field('资产到期提前天数（0=关闭）', '<input id="n-assetDays" type="number" min="0" max="90" value="' + esc(cfg.rules.assetExpiryDays != null ? cfg.rules.assetExpiryDays : 7) + '">') +
-    field('检查间隔（分钟，最小 5；受 cron 每 10 分钟限制，实际最小 10）', '<input id="n-interval" type="number" min="5" value="' + esc(cfg.intervalMinutes) + '">') +
+    field('防抖间隔（分钟，默认 1440 = 一天；只影响「立即检查」后多久才允许再跑，不影响每天 09:00 的定时）', '<input id="n-interval" type="number" min="5" max="1440" value="' + esc(cfg.intervalMinutes) + '">') +
     '</div></div>' +
     '<div class="notify-rules"><h4>日历订阅（ICS）</h4>' +
     '<div style="font-size:12px;color:var(--text-2);line-height:1.7;margin-bottom:8px">' +
@@ -1370,7 +1370,7 @@ async function openNotifyModal() {
   const $n = (id) => document.getElementById(id);
   const collect = () => ({
     enabled: !!($n('n-enabled') && $n('n-enabled').checked),
-    intervalMinutes: Number($n('n-interval').value) || 60,
+    intervalMinutes: Number($n('n-interval').value) || 1440,
     channels: {
       wxpusher: { enabled: $n('nc-wxpusher-enabled').checked, appToken: $n('nc-wxpusher-appToken').value.trim(), uids: $n('nc-wxpusher-uids').value.trim(), topicIds: $n('nc-wxpusher-topicIds').value.trim(), summaryPrefix: $n('nc-wxpusher-summaryPrefix').value.trim() },
       serverchan: { enabled: $n('nc-serverchan-enabled').checked, sendkey: $n('nc-serverchan-sendkey').value.trim() },

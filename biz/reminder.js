@@ -19,7 +19,9 @@ function money(n) {
 
 const DEFAULT_CONFIG = {
   enabled: true,
-  intervalMinutes: 60,
+  // cron 每天 09:00（北京时间）触发一次，间隔默认取一天：即使手动连点「立即检查」
+  // 也不会重复轰炸。作用是防抖，不是推送频率本身（频率由 cron 决定）。
+  intervalMinutes: 1440,
   lastCheckAt: '',
   channels: {
     wxpusher: { enabled: false, appToken: '', uids: '', topicIds: '', summaryPrefix: '管卡提醒' },
@@ -37,7 +39,7 @@ function normalizeConfig(raw) {
   const cfg = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   const r = raw || {};
   cfg.enabled = r.enabled === undefined ? true : !!r.enabled;
-  cfg.intervalMinutes = Math.max(5, Math.min(1440, Number(r.intervalMinutes) || 60));
+  cfg.intervalMinutes = Math.max(5, Math.min(1440, Number(r.intervalMinutes) || 1440));
   if (r.channels) {
     for (const k of Object.keys(cfg.channels)) {
       const src = r.channels[k] || {};

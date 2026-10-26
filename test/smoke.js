@@ -324,7 +324,21 @@ async function main() {
   const appSrc = fs.readFileSync(ROOT + '/public/app.js', 'utf8');
   ok(!/monthlySpendTarget/.test(appSrc), 'app.js 无金额目标残留');
   ok(/本月目标笔数/.test(appSrc), '表单标签已改为「本月目标笔数」');
-  ok(/Workers Cron 每 10 分钟触发/.test(appSrc), '提醒设置页文案已说明由 Workers Cron 触发（原「容器常驻进程」已过时）');
+  ok(/每天 09:00（北京时间）/.test(appSrc), '提醒设置页文案已改为「每天 09:00（北京时间）」');
+
+  console.log('== 14. 提醒调度：每天 09:00（北京时间）一次 ==');
+  const tomlSrc = fs.readFileSync(ROOT + '/wrangler.toml', 'utf8');
+  const cronLine = (tomlSrc.match(/^crons\s*=\s*\[(.*?)\]/m) || [])[1] || '';
+  ok(/0 1 \* \* \*/.test(cronLine), 'cron 为 "0 1 * * *"（UTC 01:00 = 北京 09:00）');
+  ok(!/\*\//.test(cronLine), '已不再有 */N 的高频 cron');
+  const Rdef = require(ROOT + '/biz/reminder.js');
+  ok(Rdef.normalizeConfig({}).intervalMinutes === 1440, '默认防抖间隔 = 1440 分钟（一天）');
+  ok(Rdef.normalizeConfig({ intervalMinutes: 9999 }).intervalMinutes === 1440, '间隔上限钳到 1440');
+  ok(Rdef.normalizeConfig({ intervalMinutes: 5 }).intervalMinutes === 5, '间隔下限仍是 5（手动检查不会被锁死）');
+  // 节流容差：每天 09:00 触发会差几秒，没有容差会把整天跳过
+  const routesCode = codeOnly(fs.readFileSync(ROOT + '/biz/routes.js', 'utf8'));
+  ok(/gap < cfg\.intervalMinutes - 10/.test(routesCode), '节流留 10 分钟容差（否则「每天 09:00」可能整天跳过）');
+  ok(!/\*\*/.test(tomlSrc.split('[triggers]')[0].split('\n').slice(-4).join('\n')), 'cron 注释里没有混入 Markdown 加粗');
 
   console.log('== 13. Bark 走 Worker secret 托管 ==');
   // DO 在每个请求入口把 env 写入 globalThis.ENV，这里模拟同样的注入方式

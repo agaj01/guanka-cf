@@ -46,7 +46,7 @@ export default {
     return env.ASSETS.fetch(request);
   },
 
-  /** Cron Triggers：每 10 分钟心跳（实际推送节奏由 notify.intervalMinutes 节流） */
+  /** Cron Triggers：每天 09:00（北京时间）跑一次提醒检查，一轮推完当天所有待提醒项 */
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
       try {

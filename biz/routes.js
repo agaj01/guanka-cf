@@ -2128,7 +2128,10 @@ async function runNotifyChecksInner(force) {
   if (!cfg.enabled) return { skipped: true, reason: '提醒未启用' };
   if (!force && cfg.lastCheckAt) {
     const gap = (NOW().getTime() - new Date(cfg.lastCheckAt).getTime()) / 60000;
-    if (gap < cfg.intervalMinutes) return { skipped: true, reason: `距上次检查 ${Math.round(gap)} 分钟，未达 ${cfg.intervalMinutes} 分钟间隔` };
+    // 容差 10 分钟：cron 每天固定时刻触发，实际触发会差几秒（今天 09:00:02、昨天 08:59:58）。
+    // 严格按 gap >= intervalMinutes 判，间隔设成 1440 时会出现「今天差 4 秒没到 1440 分钟」
+    // → 直接跳过一整天。留容差后「每天 09:00」稳定成立。
+    if (gap < cfg.intervalMinutes - 10) return { skipped: true, reason: `距上次检查 ${Math.round(gap)} 分钟，未达 ${cfg.intervalMinutes} 分钟间隔` };
   }
   const idx = buildIndexes();
   const now = NOW();
