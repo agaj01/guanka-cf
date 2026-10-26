@@ -55,36 +55,33 @@
 
 ## 部署
 
-线上地址：<https://card.agaj.eu.org>（自定义域名，已写在 `wrangler.toml` 的 `routes` 里）
+线上地址：<https://card.agaj.eu.org>
 
-### 方式一：连 GitHub 自动部署（推荐）
+### 当前状态
 
-Cloudflare 的 Workers Builds 会在每次 push 到 `main` 时自动构建并部署。**这一步只能在
-Dashboard 点击完成** —— Workers Builds 的配置接口只接受 user 级 token，account 级
-API Token 调不通（`GET /accounts/{id}/builds/*` 恒返回 `12006 Invalid token`）。
+| 项 | 值 |
+|---|---|
+| Worker | `guanka-cf`（账号 `f44f91bb44640d0565309ef3b8c0862e`） |
+| 自定义域名 | `card.agaj.eu.org`，`custom_domain = true`，DNS 记录与证书由 wrangler 自动创建 |
+| Git 自动部署 | 已连接 `agaj01/guanka-cf`，生产分支 `main` |
+| 构建命令 | `npm ci` |
+| 部署命令 | `npm run deploy:ci`（= preflight + 104 项冒烟 + `wrangler deploy`） |
+| 定时触发 | 每 10 分钟（提醒调度） |
+| AUTH_TOKEN | 存在 Worker 上（Secret）。CI 部署不会覆盖 secret，只有手动改才会变 |
 
-1. **先拿到 AUTH_TOKEN 并记下来**（后面要填两次一样的值）：
-   ```bash
-   openssl rand -base64 32
-   ```
-2. Dashboard → **Workers & Pages** → **Create** → **Import a repository**
-   （已有的 Worker 则进 `guanka-cf` → **Settings** → **Build** → Connect）
-3. 授权 GitHub → 选 `agaj01/guanka-cf` → 分支 `main` → 根目录留空
-4. 构建命令与部署命令填：
+改代码后 `git push` 即自动构建部署，构建日志在 Worker → **部署** 标签里。
 
-   | 项 | 值 |
-   |---|---|
-   | Build command | `npm ci` |
-   | Deploy command | `npm run deploy:ci` |
+### 方式一：连 GitHub 自动部署（已配置）
 
-   `deploy:ci` = `preflight`（含 104 项冒烟测试）+ `wrangler deploy`，
-   测试不过就不会上线。注意不要用默认的 `npx wrangler deploy`，那样会跳过测试。
-5. 保存 → 首次构建会自动跑起来，`routes` 里的 `custom_domain` 会顺带把 DNS 与证书建好
-6. 构建完再去 **Settings → Variables and Secrets** 加 `AUTH_TOKEN`（类型选 **Secret**），
-   然后 **Deployments → Retry deployment** 让它生效
+Cloudflare 的 Workers Builds 在每次 push 到 `main` 时自动构建并部署。首次配置只能走
+Dashboard —— Workers Builds 的 API **只接受 user 级 token**，CLI 的 OAuth token 与
+account 级 API Token 调用 `/accounts/{id}/builds/*` 均返回 `Authentication error` / `12006`。
 
-以后改代码只需 `git push`，Cloudflare 侧自动重新构建部署。构建日志在 Worker 详情页的
-**Deployments** 标签里，失败原因（测试挂掉、配置错）都在里面。
+在 Worker 详情页 **设置 → 构建** 里填的就是上表那两行。之后要改命令或换分支，
+同一位置点「管理」即可。
+
+**顺序很重要**：先让 Worker 存在并设好 `AUTH_TOKEN`，再连 Git。反过来也能用，
+但第一次构建出来的 Worker 没有令牌，全站 403，得再去补一次 secret 并重新部署。
 
 ### 方式二：本地 CLI 部署
 
@@ -95,7 +92,7 @@ npm run deploy
 ```
 
 `npm run deploy` = `npm run preflight && wrangler deploy`。自检不通过会直接终止，不会把半成品推上线。
-CLI 部署与 Workers Builds 部署同一个 Worker，两种方式可以混用（secrets 是 Worker 级、不会互相覆盖）。
+CLI 与 Workers Builds 部署的是同一个 Worker，可以混用（secrets 是 Worker 级、不会互相覆盖）。
 
 ### 前置
 
