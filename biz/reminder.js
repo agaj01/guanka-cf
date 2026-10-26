@@ -71,7 +71,15 @@ function normalizeConfig(raw) {
   const sc = cfg.channels.serverchan;
   if (!sc.sendkey && (ENV && ENV.SERVERCHAN_SENDKEY)) sc.sendkey = (ENV && ENV.SERVERCHAN_SENDKEY);
   const bk = cfg.channels.bark;
-  if (!bk.deviceKey && (ENV && ENV.BARK_DEVICE_KEY)) bk.deviceKey = (ENV && ENV.BARK_DEVICE_KEY);
+  // Bark 支持「服务器密钥托管」：Worker secret 里配了 BARK_DEVICE_KEY（+ 可选
+  // NOTIFY_BARK_URL 指向自建 server）时，页面不必再填 deviceKey，且自动启用该通道——
+  // 否则 secret 配好了也不会推送（enabled 默认 false），属于最典型的「配了没生效」。
+  // 托管态只影响运行时，不落盘：PUT 保存时会剥掉这些值（见 routes.js）。
+  if (!bk.deviceKey && (ENV && ENV.BARK_DEVICE_KEY)) {
+    bk.deviceKey = (ENV && ENV.BARK_DEVICE_KEY);
+    bk.deviceKeyFromEnv = true;
+  }
+  if (bk.deviceKeyFromEnv) bk.enabled = true;
   if (!bk.server) bk.server = DEFAULT_CONFIG.channels.bark.server;
   const wc = cfg.channels.wecom;
   if (!wc.webhookKey && (ENV && ENV.WECOM_WEBHOOK_KEY)) wc.webhookKey = (ENV && ENV.WECOM_WEBHOOK_KEY);

@@ -8,6 +8,7 @@
     "test": "node test/smoke.js",
     "preflight": "node scripts/preflight.js",
     "check-token": "node scripts/check-token.js",
+    "access": "node scripts/setup-access.mjs",
     "dev": "wrangler dev",
     "deploy": "npm run preflight && wrangler deploy",
     "deploy:ci": "npm run preflight && npx wrangler deploy"

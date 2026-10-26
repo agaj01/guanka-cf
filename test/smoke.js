@@ -326,6 +326,25 @@ async function main() {
   ok(/本月目标笔数/.test(appSrc), '表单标签已改为「本月目标笔数」');
   ok(/Workers Cron 每 10 分钟触发/.test(appSrc), '提醒设置页文案已说明由 Workers Cron 触发（原「容器常驻进程」已过时）');
 
+  console.log('== 13. Bark 走 Worker secret 托管 ==');
+  // DO 在每个请求入口把 env 写入 globalThis.ENV，这里模拟同样的注入方式
+  globalThis.ENV = { BARK_DEVICE_KEY: 'DevKeyForTest000000001', NOTIFY_BARK_URL: 'https://bark.example.com/pfx' };
+  const cb1 = R.normalizeConfig({});
+  ok(cb1.channels.bark.deviceKey === 'DevKeyForTest000000001', 'secret BARK_DEVICE_KEY 注入 deviceKey');
+  ok(cb1.channels.bark.deviceKeyFromEnv === true, '标记 deviceKey 来自 secret');
+  ok(cb1.channels.bark.enabled === true, 'secret 托管时通道自动启用（否则 secret 配了也永远不推）');
+  const cb2 = R.normalizeConfig({ channels: { bark: { deviceKey: 'PageFilledKey', enabled: false } } });
+  ok(cb2.channels.bark.deviceKey === 'PageFilledKey', '页面填写的 deviceKey 优先于 secret');
+  ok(cb2.channels.bark.enabled === false, '页面自己填 key 时可显式关闭，不被 secret 覆盖');
+
+  const routesMod = require(ROOT + '/biz/routes.js');
+  const stripped = routesMod.stripEnvCredentials(JSON.parse(JSON.stringify(cb1)));
+  ok(stripped.channels.bark.deviceKey === '', '落盘前剥掉 secret 注入的 deviceKey（凭证不进 DO 存储）');
+  ok(!('deviceKeyFromEnv' in stripped.channels.bark), '托管标记是运行时派生，不落盘');
+  ok(routesMod.stripEnvCredentials(R.normalizeConfig({ channels: { bark: { deviceKey: 'PageFilledKey' } } })).channels.bark.deviceKey === 'PageFilledKey',
+    '用户自己填的 deviceKey 不会被误剥');
+  delete globalThis.ENV;
+
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);
 }

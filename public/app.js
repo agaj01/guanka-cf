@@ -323,7 +323,12 @@ async function openSessionsModal() {
       } catch (e) { toast(e.message, 'error'); }
     }));
     const out = $('#sess-access-logout');
-    if (out) out.addEventListener('click', () => { location.href = '/cdn-cgi/access/logout'; });
+    if (out) out.addEventListener('click', async () => {
+      // 两层都要清：先撤销应用侧会话（gk_sid，可能由早先用 AUTH_TOKEN 登录留下），
+      // 再跳 Access 登出清 CF_Authorization。只跳后者会留下 30 天有效的应用会话。
+      try { await api('/api/auth/logout', { method: 'POST', body: {} }); } catch (e) { /* 忽略 */ }
+      location.href = '/cdn-cgi/access/logout';
+    });
     return;
   }
 
@@ -1314,8 +1319,9 @@ function notifyModalHtml(cfg) {
       [['appToken', 'appToken', 'password', 'AT_xxx'], ['uids', 'UID（多个用逗号分隔）', 'text', 'UID_xxx'], ['topicIds', '主题ID（可选）', 'text', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
     ch('serverchan', 'Server酱³', '微信/多端推送：sct.ftqq.com 获取 SendKey（SCT/SCU 开头）',
       [['sendkey', 'SendKey', 'password', 'SCTxxxxx']]) +
-    ch('bark', 'Bark', 'iOS 推送：Bark App 中复制 deviceKey（自建服务可改服务器地址）',
-      [['deviceKey', 'deviceKey', 'password', ''], ['server', '服务器地址', 'text', 'https://api.day.app'], ['level', '推送级别', 'text', 'active'], ['group', '分组', 'text', '管卡']]) +
+    ch('bark', 'Bark', 'iOS 推送：deviceKey 已用 Worker secret（BARK_DEVICE_KEY）托管，打开开关即生效；自建 server 用 NOTIFY_BARK_URL 指定',
+      [['deviceKey', 'deviceKey', 'password', c.bark && c.bark.deviceKeyFromEnv ? '已由服务器密钥托管，留空即可' : ''], ['server', '服务器地址', 'text', c.bark && c.bark.deviceKeyFromEnv ? '由 secret NOTIFY_BARK_URL 指定' : 'https://api.day.app'], ['level', '推送级别', 'text', 'active'], ['group', '分组', 'text', '管卡']],
+      c.bark && c.bark.deviceKeyFromEnv ? '<div class="field full"><span style="font-size:12px;color:var(--text-2)">✓ 已由 Worker secret 提供 deviceKey（加密存储，不会下发到浏览器）。这里留空即可，推送走 secret 里的设备。</span></div>' : '') +
     ch('wecom', '企业微信消息推送', '企业微信「消息推送」（原群机器人）：群聊右上角 →消息推送→ 添加/查看 → 复制 Webhook 地址的 key 参数',
       [['webhookKey', 'Webhook Key', 'password', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']],
       '<div class="field full"><label style="display:flex;align-items:center;justify-content:flex-start;gap:8px;font-weight:400;cursor:pointer"><input type="checkbox" id="nc-wecom-wechatCompat" style="width:16px;height:16px"' + (c.wecom && c.wecom.wechatCompat ? ' checked' : '') + '> <span>微信兼容模式</span></label></div>') +

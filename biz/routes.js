@@ -82,8 +82,40 @@ function maskNotifySecrets(cfg) {
   return clone;
 }
 
-function groupNameOf(groupId) {
-  if (!groupId) return '';
+/** 当前运行时的环境绑定（Worker secret / vars 由 DO 在请求入口写入 globalThis.ENV） */
+function currentEnv() {
+  try {
+    if (typeof ENV !== 'undefined' && ENV) return ENV;
+    if (typeof globalThis !== 'undefined' && globalThis.ENV) return globalThis.ENV;
+  } catch (e) { /* ignore */ }
+  return {};
+}
+
+/**
+ * 把「由环境变量/Worker secret 注入」的凭证从待落盘对象里剥掉。
+ * 目的：凭证只存在 secret 里，DO 存储只保存用户自己填的值。
+ * 判定标准是「值等于 env 值」——用户手填同一个值时剥掉也无副作用。
+ */
+const ENV_CREDENTIALS = [
+  ['wxpusher', 'appToken', 'WXPUSHER_APP_TOKEN'],
+  ['wxpusher', 'uids', 'WXPUSHER_UIDS'],
+  ['serverchan', 'sendkey', 'SERVERCHAN_SENDKEY'],
+  ['bark', 'deviceKey', 'BARK_DEVICE_KEY'],
+  ['wecom', 'webhookKey', 'WECOM_WEBHOOK_KEY'],
+];
+function stripEnvCredentials(cfg) {
+  const env = currentEnv();
+  for (const [ch, field, envKey] of ENV_CREDENTIALS) {
+    const envVal = env[envKey];
+    const c = cfg.channels && cfg.channels[ch];
+    if (envVal && c && c[field] === envVal) c[field] = '';
+  }
+  // 托管标记是运行时派生的，不落盘（下次 normalizeConfig 会重新判断）
+  if (cfg.channels && cfg.channels.bark) delete cfg.channels.bark.deviceKeyFromEnv;
+  return cfg;
+}
+
+function groupNameOf(groupId) {  if (!groupId) return '';
   const g = getBillGroups().find((x) => x.id === groupId);
   return g ? g.name : '';
 }
@@ -1901,29 +1933,32 @@ async function handle(method, pathname, url, body, req) {
   if (pathname === '/api/notify/config' && method === 'PUT') {
     const raw = getNotifyRaw() || {};
     const incoming = body || {};
-    // 前端回填的是掩码串；用户没改动时应保留磁盘上的原值，不能把掩码写进去
-    const existing = reminder.normalizeConfig(raw);
+    // 前端回填的是掩码串；用户没改动时应保留磁盘上的原值，不能把掩码写进去。
+    // 注意这里取的是**磁盘原值**（raw），不是 normalizeConfig(raw)：后者会把环境变量
+    // / Worker secret 注入的凭证也带出来，写回去等于把 secret 明文复制进 DO 存储，
+    // 违背「凭证只存 secret」的初衷。
+    const rawCh = raw.channels || {};
     if (incoming.channels && typeof incoming.channels === 'object') {
       for (const ch of Object.keys(NOTIFY_SECRET_FIELDS)) {
         const inCh = incoming.channels[ch];
         if (!inCh || typeof inCh !== 'object') continue;
         for (const f of NOTIFY_SECRET_FIELDS[ch]) {
           if (f in inCh && isMaskedSecret(inCh[f])) {
-            const old = (existing.channels[ch] || {})[f];
-            // 有原值 → 沿用；前端提交空掩码且磁盘也没值 → 置空
-            inCh[f] = old || '';
+            const old = (rawCh[ch] || {})[f];
+            // 有原值 → 沿用；磁盘无值（说明由 secret 托管）→ 置空，由 secret 继续供给
+            inCh[f] = typeof old === 'string' ? old : '';
           }
         }
       }
     }
-    const cfg = reminder.normalizeConfig(Object.assign({}, raw, incoming, {
+    const cfg = stripEnvCredentials(reminder.normalizeConfig(Object.assign({}, raw, incoming, {
       // sentLog/sentFail/history 不能被前端覆盖，只允许通过 check 结果更新
       sentLog: raw.sentLog || {},
       sentFail: raw.sentFail || {},
       history: raw.history || [],
-    }));
+    })));
     store.write('notify', cfg);
-    return json(maskNotifySecrets(cfg));
+    return json(maskNotifySecrets(reminder.normalizeConfig(cfg)));
   }
   if (pathname === '/api/notify/test' && method === 'POST') {
     const cfg = reminder.normalizeConfig(getNotifyRaw());
@@ -2108,7 +2143,7 @@ async function runNotifyChecksInner(force) {
   latest.sentLog = cfg.sentLog;
   latest.sentFail = cfg.sentFail; // 失败计数与 sentLog 同步回写，全失败重试语义才能跨轮次生效
   latest.history = cfg.history;
-  store.write('notify', latest);
+  store.write('notify', stripEnvCredentials(latest));
   return Object.assign({ skipped: false }, out);
 }
 
@@ -2130,6 +2165,6 @@ function syncMyCardSnapshots() {
 }
 
 module.exports = {
-  init, handle, runNotifyChecks,
+  init, handle, runNotifyChecks, stripEnvCredentials,
   _internals: { computeMyCard, computeStats, benefitUsed, benefitHistory, waiverState, normalizeCard, normalizeBenefits, cardKey, buildIndexes, resolveBenefit, sameRepaySchedule, groupAssignError },
 };

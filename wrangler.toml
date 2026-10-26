@@ -66,3 +66,9 @@ crons = ["*/10 * * * *"]
 # 可选：推送端点覆盖
 # [vars]
 # NOTIFY_BARK_URL = "https://api.day.app"
+
+# ── Cloudflare Access 信任模式 ─────────────────────────────────
+# 由 scripts/setup-access.mjs 写入；AUD 本来就写在每个签发的 JWT 里，不算机密。
+[vars]
+ACCESS_TEAM_DOMAIN = "agaj.cloudflareaccess.com"
+ACCESS_AUD = "d66b7d55897fb5265c0561d4d89bcd4e11d38c69c77b560723defbe7d7135a91"

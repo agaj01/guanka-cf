@@ -65,9 +65,12 @@
 | 自定义域名 | `card.agaj.eu.org`，`custom_domain = true`，DNS 记录与证书由 wrangler 自动创建 |
 | Git 自动部署 | 已连接 `agaj01/guanka-cf`，生产分支 `main` |
 | 构建命令 | `npm ci` |
-| 部署命令 | `npm run deploy:ci`（= preflight + 116 项冒烟 + `wrangler deploy`） |
+| 部署命令 | `npm run deploy:ci`（= preflight + 124 项冒烟 + `wrangler deploy`） |
 | 定时触发 | 每 10 分钟（提醒调度） |
 | AUTH_TOKEN | 存在 Worker 上（Secret）。CI 部署不会覆盖 secret，只有手动改才会变 |
+| **Cloudflare Access** | 已启用。应用「管卡」（`14cfcfa9-d2cd-4cf8-bf9f-d8775f266131`），domain `card.agaj.eu.org`，**session 168h**，邮箱白名单 `Jinglei1@msn.com`，One-time PIN 登录 |
+| Access 例外 | `card.agaj.eu.org/api/calendar.ics` 走 bypass（日历客户端过不了登录），由派生只读令牌把关 |
+| 推送凭证 | `BARK_DEVICE_KEY` + `NOTIFY_BARK_URL` 存 Worker secret（与「油价优选」同一台自建 Bark server 与设备） |
 
 改代码后 `git push` 即自动构建部署，构建日志在 Worker → **部署** 标签里。
 
@@ -124,6 +127,17 @@ wrangler secret put AUTH_TOKEN # 粘贴进去，这就是你以后登录用的�
 
 **配了 Access 信任模式的话，上面这张表整段可以跳过**：请求带着 Access 签发的 JWT，
 验签通过直接进，不再弹令牌框（详见后文「Access 信任模式」）。
+
+本实例现在的实际体验（Access 已启用，session 168h）：
+
+| 时刻 | 发生什么 |
+|---|---|
+| 第一次打开 | 跳 `agaj.cloudflareaccess.com` → 输 `Jinglei1@msn.com` → 收邮件验证码 → 进入（**不再输 AUTH_TOKEN**） |
+| 之后 7 天 | 直接进，Access 的 `CF_Authorization` Cookie 有效期内不重复验证 |
+| 满 168h | 再收一次验证码 |
+| 应用层会话 | Access 验签通过后 Worker 再签一张 30 天的应用会话（`gk_sid`），两者叠加：Access 过期只影响 Access，应用会话仍在 |
+| 名单外邮箱 | Access 直接拒，连 Worker 都到不了 |
+| 退出 | 「登录设备 / 访问身份」弹窗里的退出按钮跳 `/cdn-cgi/access/logout`，届时两个会话一起失效 |
 
 ### 本地开发
 
@@ -220,6 +234,21 @@ wrangler secret put ACCESS_AUD           # 64 位十六进制
 # 也可以写进 wrangler.toml 的 [vars]（这两个值不是机密，AUD 本来就写在每个 JWT 里）
 ```
 
+**一键建应用**（推荐，省得手点后台）：
+
+```bash
+export CLOUDFLARE_API_TOKEN=xxx          # Access: Apps and Policies (Edit) + Organizations (Read)
+export CLOUDFLARE_ACCOUNT_ID=f44f91bb44640d0565309ef3b8c0862e
+export APP_DOMAIN=card.agaj.eu.org
+export ACCESS_EMAILS="Jinglei1@msn.com"
+npm run access                            # 建应用（session 168h）+ 邮箱白名单 + 写回 [vars]
+npm run deploy                            # 让 vars 上线
+```
+
+脚本会：读 Zero Trust 组织拿 team domain → 找/建同域名应用并把 **session_duration 设成 168h**
+→ 策略只 allow 名单内邮箱（One-time PIN 登录，邮箱收码即可）→ 把 `ACCESS_TEAM_DOMAIN` /
+`ACCESS_AUD` 幂等写进 `wrangler.toml` 的 `[vars]`。加 `ACCESS_NO_WRITE=1` 只打印不写文件。
+
 启用后浏览器请求带 `Cf-Access-Jwt-Assertion`，验签通过即视为已认证，**不再弹令牌框**；
 `AUTH_TOKEN` 退化成纯 API / 日历订阅用途。
 
@@ -249,6 +278,36 @@ wrangler secret put ACCESS_AUD           # 64 位十六进制
 ```
 
 失败告警有 60s 节流，不会因为被刷而灌满日志。
+
+---
+
+## 推送通道：凭证放 Worker secret，不放页面
+
+四个通道（WxPusher / Server酱³ / Bark / 企业微信）都可以用 secret 托管凭证，
+页面上留空即可 —— 凭证**不会下发到浏览器**，也不会被写进 DO 存储
+（`stripEnvCredentials()` 在保存前剥掉所有「值等于 env 值」的凭证字段）。
+
+| 通道 | secret 名 | 说明 |
+|---|---|---|
+| Bark | `BARK_DEVICE_KEY` | 设备 key；**配了它通道自动启用**，不用先在页面上打开开关 |
+| Bark | `NOTIFY_BARK_URL` | 自建 server 地址（含路径前缀也行，如 `https://bark.example.com/pfx`），配了它就不做 SSRF 校验 |
+| WxPusher | `WXPUSHER_APP_TOKEN` / `WXPUSHER_UIDS` | |
+| Server酱³ | `SERVERCHAN_SENDKEY` | |
+| 企业微信 | `WECOM_WEBHOOK_KEY` | |
+
+```bash
+# 与「油价优选」共用同一台自建 Bark server 和设备
+printf '%s' '<deviceKey>'      | wrangler secret put BARK_DEVICE_KEY
+printf '%s' 'https://agaj.de5.net/xxxxxx' | wrangler secret put NOTIFY_BARK_URL
+wrangler secret list           # 应能看到 AUTH_TOKEN / BARK_DEVICE_KEY / NOTIFY_BARK_URL
+```
+
+行为细节：
+
+- 推送走 Bark 标准 `POST {NOTIFY_BARK_URL}/push`，body 里带 `device_key`、`group`（默认「管卡」）、`isArchive=1`
+- 页面自己填了 `deviceKey` 时以页面为准，可以显式关掉开关，不被 secret 覆盖
+- 想要「改了 secret 立刻生效」不需要重新部署：secret 更新即产生新版本，代码不变
+- 提醒是否真的发出去，看「提醒设置 → 最近推送记录」，每条记录带各通道的 ✓/✗ 与失败原因
 
 ---
 
