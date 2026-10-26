@@ -63,8 +63,8 @@ function showLogin(message) {
     '<div class="modal-header"><div class="modal-title">需要访问令牌</div></div>' +
     '<div class="modal-body">' +
     '<div style="font-size:13px;color:var(--text-2);line-height:1.7;margin-bottom:12px">' +
-    '本服务已启用访问控制。请输入启动容器时设置的 <code>AUTH_TOKEN</code> 环境变量的值。' +
-    '令牌只保存在服务端，浏览器仅持有一个 HttpOnly 会话 Cookie。' +
+    '本服务已启用访问控制。请输入部署时设置的 <code>AUTH_TOKEN</code>（<code>wrangler secret put AUTH_TOKEN</code>）。' +
+    '主令牌只用于换取会话，浏览器仅持有一个 HttpOnly 随机会话 Cookie，不保存主令牌本身。' +
     '</div>' +
     '<input id="login-token" type="password" placeholder="AUTH_TOKEN" autocomplete="current-password" style="width:100%">' +
     '<div id="login-tip" style="font-size:12px;color:var(--red);margin-top:8px;display:' + (message ? '' : 'none') + '">' + esc(message || '') + '</div>' +
@@ -99,10 +99,25 @@ async function checkAuth() {
   try {
     const st = await api('/api/auth/status');
     const btn = $('#btn-logout');
-    // 仅在「服务端启用了鉴权」时显示登出按钮；回环免登录模式下隐藏
-    if (btn) btn.style.display = st.authRequired ? '' : 'none';
+    // 服务端必然启用鉴权（未配置令牌时全部 403），登出/会话入口恒显示
+    if (btn) btn.style.display = '';
+    // 令牌过弱提示：服务端只在已授权时回传该字段，避免未登录探测
+    if (st.weakToken) showWeakTokenBanner(st.weakToken);
     return st;
-  } catch (e) { return { authRequired: false, authorized: true }; }
+  } catch (e) { return { authRequired: true, authorized: false }; }
+}
+
+function showWeakTokenBanner(reason) {
+  if ($('#weak-token-banner')) return;
+  const el = document.createElement('div');
+  el.id = 'weak-token-banner';
+  el.style.cssText = 'background:#fdf0f0;border:1px solid #f0cccc;color:#991b1b;' +
+    'padding:10px 14px;border-radius:8px;margin:0 0 14px;font-size:13px;line-height:1.6';
+  el.innerHTML = '⚠️ <b>主令牌强度不足</b>：' + esc(reason) +
+    '<br>登录限流只有「每个 IP 每 5 次锁 1 分钟起的指数退避」，分布式 IP 池仍可穷举。请更换为 <code>openssl rand -base64 32</code> 生成的令牌：' +
+    '<code>wrangler secret put AUTH_TOKEN</code>。更换后所有设备会重新登录。';
+  const app = document.getElementById('app');
+  if (app && app.parentNode) app.parentNode.insertBefore(el, app);
 }
 
 function toast(msg, type) {
@@ -152,12 +167,12 @@ const state = {
   settings: { theme: 'light', bankOrder: [], banksCollapsed: {}, cardBanksCollapsed: {} },
   myCards: [],
   cards: [],
-  bills: [],
   billGroups: [],
   stats: null,
   drawerId: null,
   filter: 'all',
-  sort: 'name',
+  // 默认排序：年费未达标优先 → 免息期长优先（本项目的主用途）
+  sort: 'waiver',
   // 扩展资产（移植自 Benefit Tracker）
   memberships: [],
   vouchers: [],
@@ -177,15 +192,15 @@ const CYCLE_BADGE = { '自然月': 'badge-blue', '自然年': 'badge-purple', '�
 const FEE_BADGE = { default: 'badge-default', yellow: 'badge-yellow', red: 'badge-red' };
 
 // ---------- 启动 ----------
-// 页脚版本信息：以服务端 /api/health 返回的版本为准（免鉴权，登录前后都可见；
-// 前端静态文件可能被浏览器缓存，后端版本才是当前真实运行的版本）
-async function fillVersion() {
+// 页脚版本：前端常量。
+// 上游版本从 /api/health 取版本号，但该端点免鉴权——未登录即可读出后端版本，
+// 属于不必要的指纹暴露。健康检查现在只回 {ok:true}，版本改由前端静态声明。
+const APP_VERSION = '2.0.0';
+
+function fillVersion() {
   const el = document.getElementById('footer');
   if (!el) return;
-  try {
-    const h = await api('/api/health');
-    el.textContent = '管卡 v' + (h.version || '1.0.0');
-  } catch (e) { /* 拉不到就保留占位文本，不阻塞启动 */ }
+  el.textContent = '管卡 CF v' + APP_VERSION;
 }
 
 async function boot() {
@@ -199,14 +214,14 @@ async function boot() {
 }
 
 async function loadAll() {
-  // mycards 响应已合并 stats/bills/billGroups（服务端一次索引计算），省去单独的统计请求。
+  // mycards 响应已合并 stats/billGroups（服务端一次索引计算），省去单独的统计请求。
+  // 账单模块（/api/bills）已移除，不再请求。
   // 主数据与扩展资产合并为一批并行：两组接口互不依赖，串行两批白白多等一个网络往返。
-  // 扩展资产单独兜底：老备份/异常时降级为空列表，不阻塞主页面。
   const fallbackAssets = () => ({ memberships: [], vouchers: [], voucherBrands: [], knowledge: [], assetStats: null });
-  let settings, meta, mycardsResp, cards, bills, assets;
+  let settings, meta, mycardsResp, cards, assets;
   try {
-    [settings, meta, mycardsResp, cards, bills, assets] = await Promise.all([
-      api('/api/settings'), api('/api/meta'), api('/api/mycards'), api('/api/cards'), api('/api/bills'),
+    [settings, meta, mycardsResp, cards, assets] = await Promise.all([
+      api('/api/settings'), api('/api/meta'), api('/api/mycards'), api('/api/cards'),
       Promise.all([
         api('/api/memberships'), api('/api/vouchers'), api('/api/voucherbrands'), api('/api/knowledge'), api('/api/assets/stats'),
       ]).then(([memberships, vouchers, voucherBrands, knowledge, assetStats]) =>
@@ -224,8 +239,6 @@ async function loadAll() {
   state.stats = mycardsResp.stats || emptyStats();
   state.billGroups = mycardsResp.billGroups || [];
   state.cards = cards;
-  state.bills = bills || [];
-  state._billsByCard = null; // 账单索引缓存随数据整体刷新失效
   state.memberships = assets.memberships;
   state.vouchers = assets.vouchers;
   state.voucherBrands = assets.voucherBrands;
@@ -249,7 +262,51 @@ function bindNav() {
   $('#theme-toggle').addEventListener('click', toggleTheme);
   $('#btn-notify').addEventListener('click', openNotifyModal);
   const logout = $('#btn-logout');
-  if (logout) logout.addEventListener('click', async () => {
+  if (logout) logout.addEventListener('click', openSessionsModal);
+}
+
+/* ---------------- 登录设备 / 会话管理 ---------------- */
+// 因为服务端会话表是真表，这里可以列出每台设备并单独吊销——
+// 上游版本把主令牌当 Cookie，根本没有「只踢掉某一台」的能力。
+async function openSessionsModal() {
+  let data;
+  try { data = await api('/api/auth/sessions'); } catch (e) { return toast(e.message, 'error'); }
+  const rows = (data.sessions || []).map((s) =>
+    '<div class="nh-item">' +
+    '<span class="badge ' + (s.current ? 'badge-green' : 'badge-default') + '">' + (s.current ? '本机' : '其他') + '</span>' +
+    '<span class="nh-title">' + esc(s.ua || '未知设备') + '</span>' +
+    '<span class="nh-time">' + esc(s.ip || '') + ' · 最近 ' + esc(String(s.lastSeen || '').slice(0, 16).replace('T', ' ')) + '</span>' +
+    (s.current ? '' : '<button class="btn small danger" data-revoke="' + esc(s.id) + '">下线</button>') +
+    '</div>').join('');
+
+  openModal('<div class="modal-title">登录设备（共 ' + (data.sessions || []).length + ' 台）</div>',
+    '<div class="notify-rules" style="margin-top:0">' + (rows || '<div class="empty-tip">没有其他登录设备</div>') + '</div>' +
+    '<div style="font-size:12px;color:var(--text-3);margin-top:10px;line-height:1.7">' +
+    '每台设备持有一张独立的随机会话凭证，可以单独下线；下线后该设备立即失去访问权限，主令牌不受影响。' +
+    '</div>',
+    '<button class="btn" data-close>关闭</button>' +
+    '<button class="btn danger" id="sess-all">其他设备全部下线</button>' +
+    '<button class="btn primary" id="sess-logout">退出登录</button>');
+
+  $$('[data-revoke]').forEach((btn) => btn.addEventListener('click', async () => {
+    try {
+      await api('/api/auth/sessions/revoke', { method: 'POST', body: { id: btn.dataset.revoke } });
+      toast('已下线该设备');
+      closeModal();
+      openSessionsModal();
+    } catch (e) { toast(e.message, 'error'); }
+  }));
+
+  $('#sess-all').addEventListener('click', async (e) => {
+    if (!(await confirmDialog('把其他设备全部下线？本机保持登录。'))) return;
+    try {
+      const r = await api('/api/auth/logout-all', { method: 'POST', body: { includeSelf: false } });
+      toast('已下线 ' + (r.revoked || 0) + ' 台设备');
+      closeModal();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+
+  $('#sess-logout').addEventListener('click', async () => {
     try { await api('/api/auth/logout', { method: 'POST', body: {} }); } catch (e) { /* 忽略 */ }
     location.reload();
   });
@@ -291,7 +348,7 @@ function orderedBanks(banks) {
 // 空统计兜底：旧版 API 兼容路径（mycardsResp 为纯数组）拿不到 stats，
 // 渲染层直接取 s.feeExpiring 等字段会 TypeError 白屏
 function emptyStats() {
-  return { totalCards: 0, totalBanks: 0, maxCreditSum: 0, monthSpend: 0, yearSpend: 0, feeExpiring: [] };
+  return { totalCards: 0, totalBanks: 0, maxCreditSum: 0, monthCount: 0, yearCount: 0, feeExpiring: [] };
 }
 
 function renderMyCards() {
@@ -301,13 +358,13 @@ function renderMyCards() {
     '<div class="stats">' +
     statCard('持卡总数', fmtInt(s.totalCards) + ' 张', '共 ' + fmtInt(s.totalBanks) + ' 家银行', false) +
     statCard('各银行最高授信合计', fmtMoney(s.maxCreditSum), '每家银行取最高额度相加', false) +
-    statCard('本月总消费', fmtMoney(s.monthSpend), '年度总消费 ' + fmtMoney(s.yearSpend), false) +
+    statCard('本月消费笔数', fmtInt(s.monthCount) + ' 笔', '本年累计 ' + fmtInt(s.yearCount) + ' 笔', false) +
     statCard('年费即将到期', fmtInt(s.feeExpiring.length) + ' 张', s.feeExpiring.length ? '30 天内需缴费：' + feeNames : '暂无需要缴费的卡', s.feeExpiring.length > 0, 'stat-fee-expiring') +
     '</div>' +
     '<div class="toolbar">' +
     '<button class="btn primary" id="btn-add-card">＋ 添加持卡</button>' +
     '<button class="btn" id="btn-cardsdb">卡种库</button>' +
-    '<button class="btn" id="btn-billgroups">合并账单</button>' +
+    '<button class="btn" id="btn-billgroups">合并还款</button>' +
     '<button class="btn" id="btn-export">导出持卡</button>' +
     '<button class="btn" id="btn-mycards-import">批量导入</button>' +
     '<button class="btn" id="btn-backup-export">备份</button>' +
@@ -315,9 +372,10 @@ function renderMyCards() {
     '<button class="btn" id="btn-cloud-sync">云同步' + (SYNC.on ? '<span id="sync-dot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + (SYNC._status === 'err' ? '#c0392b' : '#27ae60') + ';margin-left:5px;vertical-align:middle"></span>' : '') + '</button>' +
     '<select id="filter-select" class="filter-select">' +
     option('all', '全部卡片', true) + option('repay', '本月需还款', true) + option('fee', '年费临近(30天)', true) +
-    option('met', '年费已达标', true) + option('unpaid', '有未还账单', true) + option('benefit', '有剩余权益', true) +
+    option('met', '年费已达标', true) + option('unmet', '年费未达标', true) + option('benefit', '有剩余权益', true) +
     '</select>' +
     '<select id="sort-select" class="filter-select">' +
+    option('waiver', '年费未达标优先') + option('interest', '按免息期长') +
     option('name', '按名称') + option('fee', '按年费临近') + option('repay', '按还款临近') + option('bank', '按银行') +
     '</select>' +
     '<div class="spacer"></div>' +
@@ -369,16 +427,42 @@ function option(value, label, isFilter) {
   return option2(value, label, isFilter ? state.filter : state.sort);
 }
 
+// 年费是否「还需要你操心」：需要缴年费/未刷满都算。排序与筛选共用同一口径。
+function needsFeeAttention(m) {
+  return !!(m.waiver && m.waiver.needsPayment);
+}
+
+// 免息期天数：服务端按「账单日 → 对应到期日」算好（maxInterestDays），
+// 用户手填了 maxInterestDays 则优先用填的值。缺失时退回 0，排在最后。
+function interestFreeDaysOf(m) {
+  const v = Number(m.interestFreeDays);
+  return Number.isFinite(v) ? v : 0;
+}
+
 function applyFilterSort(list) {
   let out = list.slice();
   const f = state.filter;
   if (f === 'repay') out = out.filter((m) => (m.payment && m.payment.payDaysLeft <= 7));
-  else if (f === 'fee') out = out.filter((m) => m.waiver.needsPayment && m.feeDays <= 30);
+  else if (f === 'fee') out = out.filter((m) => needsFeeAttention(m) && m.feeDays <= 30);
   else if (f === 'met') out = out.filter((m) => m.feeStatus && m.feeStatus !== '未达标');
-  else if (f === 'unpaid') out = out.filter((m) => unpaidCount(m) > 0);
+  else if (f === 'unmet') out = out.filter((m) => needsFeeAttention(m));
   else if (f === 'benefit') out = out.filter((m) => (m.benefits || []).some((b) => b.total < 0 || (b.remaining != null && b.remaining > 0)));
   const s = state.sort;
-  if (s === 'fee') out.sort((a, b) => a.feeDays - b.feeDays);
+  if (s === 'waiver') {
+    // 一级：年费未达标/需缴的排前面；二级：免息期长的排前面；
+    // 三级：同样条件下年费日更近的排前面（同分时有稳定次序，不易看漏）
+    out.sort((a, b) => {
+      const ta = needsFeeAttention(a) ? 0 : 1;
+      const tb = needsFeeAttention(b) ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+      const ia = interestFreeDaysOf(a);
+      const ib = interestFreeDaysOf(b);
+      if (ib !== ia) return ib - ia;
+      return (a.feeDays || 0) - (b.feeDays || 0);
+    });
+  } else if (s === 'interest') {
+    out.sort((a, b) => interestFreeDaysOf(b) - interestFreeDaysOf(a));
+  } else if (s === 'fee') out.sort((a, b) => a.feeDays - b.feeDays);
   else if (s === 'repay') out.sort((a, b) => (a.payment ? a.payment.payDaysLeft : 999) - (b.payment ? b.payment.payDaysLeft : 999));
   else if (s === 'bank') out.sort((a, b) => String(a.bank).localeCompare(String(b.bank), 'zh'));
   return out;
@@ -399,7 +483,7 @@ function cardRowHtml(m) {
   return '<div class="card-row" data-id="' + m.id + '">' +
     '<div><div class="card-name">' + esc(m.name) + (m.alias ? '<span class="alias">“' + esc(m.alias) + '”</span>' : '') + (groupBadge ? ' ' + groupBadge : '') + '</div>' +
     '<div class="card-sub">' + esc(m.bank) + ' · ' + esc(m.org) + ' · ' + esc(m.level) + ' · 额度 ' + fmtMoney(m.creditLimit) + (m.last4 ? ' · 尾号 ' + esc(m.last4) : '') + '</div>' +
-    '<div class="card-sub">还款 ' + esc(p.dueDate || '—') + (p.lastPayDate && p.lastPayDate !== p.dueDate ? '（最晚 ' + esc(p.lastPayDate) + '）' : '') + ' · 账单日 ' + (m.billingDay || '—') + '</div></div>' +
+    '<div class="card-sub">还款 ' + esc(p.dueDate || '—') + (p.lastPayDate && p.lastPayDate !== p.dueDate ? '（最晚 ' + esc(p.lastPayDate) + '）' : '') + ' · 账单日 ' + (m.billingDay || '—') + ' · 免息 ' + fmtInt(interestFreeDaysOf(m)) + ' 天</div></div>' +
     '<div class="waiver-cell">' + waiverCellHtml(m) + '</div>' +
     '<div class="fee-cell">' + repayBadgeHtml(m) + ' ' + feeBadgeHtml(m) + '</div>' +
     '<div><button class="btn small" data-act="detail">详情</button></div>' +
@@ -450,16 +534,23 @@ function waiverCellHtml(m) {
         (on && m.assetWaivedDate ? '<div class="slider-date">' + esc(m.assetWaivedDate) + '</div>' : '') +
         '</span></button>';
     }
-    case '消费刷免':
+    case '消费刷免': {
+      // 只记笔数后无法自动判定「金额刷满」，改为人工确认开关
+      const on = !!m.manualWaiver;
+      return '<button class="slider-toggle' + (on ? ' on' : '') + '" data-act="toggle-manual-waiver" data-id="' + m.id + '" title="需刷满 ' + esc(m.waiverCondition || '') + ' 元（本项目不记金额，达标后手动标记）">' +
+        '<span class="slider-track"><span class="slider-knob"></span></span>' +
+        '<span><span class="slider-label">' + (on ? '已达标' : '未达标 · 手动') + '</span>' +
+        '</span></button>';
+    }
     case '笔数刷免': {
       const pct = w.target > 0 ? Math.min(100, Math.round((w.progress / w.target) * 100)) : 0;
-      const unit = w.unit === '元' ? fmtMoney(w.progress) + ' / ' + fmtMoney(w.target) : fmtInt(w.progress) + ' / ' + fmtInt(w.target) + ' 笔';
+      const unit = fmtInt(w.progress) + ' / ' + fmtInt(w.target) + ' 笔';
       const done = w.met;
       return '<div class="progress">' +
         '<div class="progress-track"><div class="progress-fill' + (done ? ' done' : '') + '" style="width:' + pct + '%"></div></div>' +
         '<div class="progress-text"><span>' + unit + '</span>' +
         (done ? '<span style="color:var(--green);font-weight:600">已达标</span>'
-          : '<span class="remaining">剩余 ' + (w.unit === '元' ? fmtMoney(w.remaining) : fmtInt(w.remaining) + ' 笔') + '</span>') +
+          : '<span class="remaining">还差 ' + fmtInt(w.remaining) + ' 笔</span>') +
         '</div></div>';
     }
     default:
@@ -590,6 +681,8 @@ function bindPageEvents() {
     if (pts) pts.addEventListener('click', (e) => { e.stopPropagation(); togglePoints(row.dataset.id); });
     const asset = $('[data-act="toggle-asset"]', row);
     if (asset) asset.addEventListener('click', (e) => { e.stopPropagation(); toggleAsset(row.dataset.id); });
+    const mw = $('[data-act="toggle-manual-waiver"]', row);
+    if (mw) mw.addEventListener('click', (e) => { e.stopPropagation(); toggleManualWaiver(row.dataset.id); });
   });
 
   // 卡种库行
@@ -641,6 +734,17 @@ async function toggleAsset(id) {
   } catch (e) { toast(e.message, 'error'); }
 }
 
+/** 消费金额刷免的人工达标开关（只记笔数，金额门槛无法自动判定） */
+async function toggleManualWaiver(id) {
+  const m = state.myCards.find((x) => x.id === id);
+  if (!m) return;
+  try {
+    await api('/api/mycards/' + id, { method: 'PUT', body: { manualWaiver: !m.manualWaiver } });
+    toast(m.manualWaiver ? '已取消达标标记' : '已标记本年达标');
+    await loadAll();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
 async function exportCards() {
   if (!state.myCards.length) return toast('还没有持卡可导出', 'error');
   // 下载是浏览器直接发起的新导航，不经过 api()，因此需要手动带上会话凭据：
@@ -667,7 +771,7 @@ async function exportCards() {
   }
 }
 
-// ---------- 持卡备份：导出（全量 JSON，含权益/消费/账单） ----------
+// ---------- 持卡备份：导出（全量 JSON，含权益/消费笔数） ----------
 async function exportBackup() {
   if (!state.myCards.length && !state.memberships.length && !state.vouchers.length && !state.knowledge.length) return toast('还没有可备份的数据', 'error');
   try {
@@ -690,7 +794,7 @@ async function exportBackup() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    toast('备份已下载（含持卡、权益、消费、账单）');
+    toast('备份已下载（含持卡、权益、消费笔数）');
   } catch (e) {
     toast('备份导出失败：' + e.message, 'error');
   }
@@ -707,7 +811,7 @@ function openBackupImportModal() {
     '<option value="merge">合并（推荐）— 保留现有数据，追加备份中的卡与记录</option>' +
     '<option value="replace">覆盖 — 清空现有持卡数据，完全以备份为准</option>' +
     '</select></div>' +
-    '<div id="backup-warn" style="display:none;font-size:12px;color:#c0392b;margin-bottom:8px">⚠️ 覆盖模式会先清空现有持卡、消费、权益与账单数据，且不可撤销，请确认已有备份文件。</div>' +
+    '<div id="backup-warn" style="display:none;font-size:12px;color:#c0392b;margin-bottom:8px">⚠️ 覆盖模式会先清空现有持卡、消费笔数、权益数据，且不可撤销，请确认已有备份文件。</div>' +
     '<div id="backup-result" style="margin-top:10px"></div>',
     '<button class="btn" data-close>取消</button><button class="btn primary" id="btn-do-backup-import">开始恢复</button>');
   $('#backup-mode').addEventListener('change', (e) => {
@@ -719,7 +823,7 @@ function openBackupImportModal() {
     const file = $('#backup-file').files[0];
     if (!file) return toast('请选择备份 JSON 文件', 'error');
     const mode = $('#backup-mode').value;
-    if (mode === 'replace' && !confirm('确定覆盖？现有持卡、消费、权益与账单数据将被清空，以备份文件为准，不可撤销。\n\n建议先点「备份」导出当前数据再操作。')) return;
+    if (mode === 'replace' && !confirm('确定覆盖？现有持卡、消费笔数、权益数据将被清空，以备份文件为准，不可撤销。\n\n建议先点「备份」导出当前数据再操作。')) return;
     btn.disabled = true;
     try {
       // 前置大小检查：后端 body 上限 20MB（上限内 JSON 结构开销略超原始数据），
@@ -734,7 +838,7 @@ function openBackupImportModal() {
         (r.dedupedCards > 0 ? '<div class="badge badge-yellow" style="margin-left:6px">已存在跳过 ' + r.dedupedCards + ' 张</div>' : '') +
         (r.skippedCards > 0 ? '<div class="badge badge-yellow" style="margin-left:6px">卡种匹配失败 ' + r.skippedCards + ' 张</div>' : '') +
         (r.cardTypesAdded > 0 ? '<div class="badge badge-green" style="margin-left:6px">新建卡种 ' + r.cardTypesAdded + ' 个</div>' : '') +
-        '<div class="badge" style="margin-left:6px">消费 ' + r.consumptions + ' 条 · 权益 ' + r.benefitRecords + ' 条 · 账单 ' + r.bills + ' 条</div>';
+        '<div class="badge" style="margin-left:6px">消费笔数记录 ' + r.consumptions + ' 条 · 权益记录 ' + r.benefitRecords + ' 条</div>';
       // v2 备份的四类扩展资产计数（旧备份无此字段则不展示）
       const assetParts = [];
       if (r.memberships != null) assetParts.push('会员卡 ' + r.memberships);
@@ -933,7 +1037,7 @@ async function initCloudSync() {
     if (!remote || !Array.isArray(remote.myCards)) { SYNC._restored = true; return; } // 云端为空 → 可安全上传
     // 云端有备份：merge 导入（幂等，重复项全跳过），本地与云端取并集
     const r = await api('/api/mycards/import', { method: 'POST', body: { data: remote, mode: 'merge' } });
-    const n = (r.importedCards || 0) + (r.consumptions || 0) + (r.benefitRecords || 0) + (r.bills || 0) +
+    const n = (r.importedCards || 0) + (r.consumptions || 0) + (r.benefitRecords || 0) +
       (r.memberships || 0) + (r.vouchers || 0) + (r.voucherBrands || 0) + (r.knowledge || 0);
     if (!n) SYNC._skipNextPush = true; // 完全幂等 → 无需回传
     else toast('已从云端合并 ' + r.importedCards + ' 张持卡等数据');
@@ -1020,7 +1124,7 @@ function openCloudSyncModal() {
       const r = await api('/api/mycards/import', { method: 'POST', body: { data: remote, mode } });
       SYNC._skipNextPush = true; // 恢复即云→本地方向，无需立刻回传
       const parts = ['恢复 ' + r.importedCards + ' 张持卡'];
-      if (r.consumptions != null) parts.push('消费 ' + r.consumptions + ' 条 · 权益 ' + (r.benefitRecords || 0) + ' 条 · 账单 ' + (r.bills || 0) + ' 条');
+      if (r.consumptions != null) parts.push('消费笔数记录 ' + r.consumptions + ' 条 · 权益记录 ' + (r.benefitRecords || 0) + ' 条');
       toast(parts.join('，'));
       closeModal();
       await loadAll();
@@ -1163,18 +1267,14 @@ function notifyModalHtml(cfg) {
     field('年费提前提醒天数（逗号分隔）', '<input id="n-feeDays" value="' + esc((cfg.rules.feeDays || []).join(',')) + '" placeholder="30,7,1">') +
     field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +
     field('月任务月末提醒天数（0=关闭）', '<input id="n-taskDays" type="number" min="0" value="' + esc(cfg.rules.taskRemainDays) + '">') +
-    field('账单到期提前天数', '<input id="n-billDays" type="number" min="0" value="' + esc(cfg.rules.billBeforeDays) + '">') +
     field('资产到期提前天数（0=关闭）', '<input id="n-assetDays" type="number" min="0" max="90" value="' + esc(cfg.rules.assetExpiryDays != null ? cfg.rules.assetExpiryDays : 7) + '">') +
     field('检查间隔（分钟，最小 5）', '<input id="n-interval" type="number" min="5" value="' + esc(cfg.intervalMinutes) + '">') +
-    '<div class="field full"><label>账单已过到期日仍未还时提醒</label><select id="n-billOverdue"><option value="1"' + (cfg.rules.billOverdueRemind ? ' selected' : '') + '>开启</option><option value="0"' + (!cfg.rules.billOverdueRemind ? ' selected' : '') + '>关闭</option></select></div>' +
     '</div></div>' +
     '<div class="notify-rules"><h4>日历订阅（ICS）</h4>' +
     '<div style="font-size:12px;color:var(--text-2);line-height:1.7;margin-bottom:8px">' +
-    '把还款日、年费日、账单到期、刷卡任务截止，以及会员卡/卡票/知识库的到期日导入系统日历（Apple 日历 / Google 日历 / Outlook 等订阅后自动更新）。' +
-    '因日历客户端无法携带登录 Cookie，订阅链接需带访问令牌——在下方输入令牌生成完整链接，或手动拼接 <code>/api/calendar.ics?token=你的令牌</code>。' +
-    '</div>' +
-    '<div class="form-grid">' +
-    '<div class="field full"><label>访问令牌（仅用于本地拼链接，不会发送保存）</label><input id="n-ics-token" type="password" placeholder="AUTH_TOKEN" autocomplete="off"></div>' +
+    '把还款日、年费日、以及会员卡/卡票/知识库的到期日导入系统日历（Apple 日历 / Google 日历 / Outlook 等订阅后自动更新）。' +
+    '日历客户端无法携带登录 Cookie，因此订阅链接里带的是<b>独立的只读日历令牌</b>（由主令牌派生，只能读日历、没有任何写权限）。' +
+    '点下面按钮由服务端生成，无需手动输入主令牌。' +
     '</div>' +
     '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">' +
     '<button class="btn" id="n-ics-gen" type="button">生成订阅链接</button>' +
@@ -1182,7 +1282,7 @@ function notifyModalHtml(cfg) {
     '</div>' +
     '<div id="n-ics-out" style="margin-top:8px;display:none">' +
     '<input id="n-ics-url" readonly style="width:100%;font-size:12px;font-family:monospace;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);color:var(--text-1)">' +
-    '<div style="font-size:11px;color:var(--text-3);margin-top:4px">包含事件：还款日（含宽限期）、年费日、账单到期（未还含逾期）、刷卡任务截止、资产到期（会员卡/储值卡、卡/票、知识库订阅）；约 6 个月滚动窗口；提前 1 天提醒。</div>' +
+    '<div style="font-size:11px;color:var(--text-3);margin-top:4px">包含事件：还款日（含宽限期）、年费日、资产到期（会员卡/储值卡、卡/票、知识库订阅）；约 6 个月滚动窗口；提前 1 天提醒。</div>' +
     '</div>' +
     '</div>' +
     '<div id="n-result" class="notify-result"></div>' +
@@ -1219,9 +1319,7 @@ async function openNotifyModal() {
       feeDays: String($n('n-feeDays').value).split(/[,，\s]+/).map(Number).filter((x) => isFinite(x) && x >= 0),
       repayBeforeDays: Number($n('n-repayDays').value) || 0,
       taskRemainDays: Number($n('n-taskDays').value) || 0,
-      billBeforeDays: Number($n('n-billDays').value) || 0,
       assetExpiryDays: Math.max(0, Math.min(90, Number($n('n-assetDays') && $n('n-assetDays').value) || 0)),
-      billOverdueRemind: ($n('n-billOverdue') && $n('n-billOverdue').value === '1') ? 1 : 0,
     },
   });
 
@@ -1229,14 +1327,17 @@ async function openNotifyModal() {
 
   // ---- 日历订阅链接生成 ----
   let icsUrl = '';
-  $n('n-ics-gen').addEventListener('click', () => {
-    const t = ($n('n-ics-token').value || '').trim();
-    if (!t) { showResult('<div class="badge badge-yellow">请先输入访问令牌</div>'); return; }
-    icsUrl = location.origin + '/api/calendar.ics?token=' + encodeURIComponent(t);
-    const out = $n('n-ics-out');
-    out.style.display = '';
-    $n('n-ics-url').value = icsUrl;
-    $n('n-ics-copy').style.display = '';
+  $n('n-ics-gen').addEventListener('click', async (ev) => {
+    try {
+      // 服务端下发派生令牌：主令牌永不出现在浏览器里，也不再写进 URL
+      const r = await api('/api/auth/calendar-token');
+      icsUrl = location.origin + r.path;
+      const out = $n('n-ics-out');
+      out.style.display = '';
+      $n('n-ics-url').value = icsUrl;
+      $n('n-ics-copy').style.display = '';
+      showResult('<div class="badge badge-green">已生成只读日历令牌</div>');
+    } catch (e) { showResult('<div class="badge badge-red">' + esc(e.message) + '</div>'); }
   });
   $n('n-ics-copy').addEventListener('click', async () => {
     try {
@@ -1446,14 +1547,18 @@ function renderDrawer() {
 function drawerHtml(m) {
   const w = m.waiver;
   let feePolicyHtml = '';
-  if (w.kind === '消费刷免' || w.kind === '笔数刷免') {
+  if (w.kind === '笔数刷免') {
     const pct = w.target > 0 ? Math.min(100, Math.round((w.progress / w.target) * 100)) : 0;
     feePolicyHtml =
       '<div class="progress"><div class="progress-track"><div class="progress-fill' + (w.met ? ' done' : '') + '" style="width:' + pct + '%"></div></div>' +
-      '<div class="progress-text"><span>' + (w.unit === '元' ? fmtMoney(w.progress) + ' / ' + fmtMoney(w.target) : fmtInt(w.progress) + ' / ' + fmtInt(w.target) + ' 笔') + '</span>' +
-      (w.met ? '<span style="color:var(--green);font-weight:600">已达标</span>' : '<span class="remaining">剩余 ' + (w.unit === '元' ? fmtMoney(w.remaining) : fmtInt(w.remaining) + ' 笔') + '</span>') +
+      '<div class="progress-text"><span>' + fmtInt(w.progress) + ' / ' + fmtInt(w.target) + ' 笔</span>' +
+      (w.met ? '<span style="color:var(--green);font-weight:600">已达标</span>' : '<span class="remaining">还差 ' + fmtInt(w.remaining) + ' 笔</span>') +
       '</div></div>' +
-      '<div style="font-size:12px;color:var(--text-3)">' + esc(w.kind) + ' ' + esc(m.waiverCondition || '') + ' · 按卡年统计（自上个年费日 ' + esc(m.feeMonth) + ' 月 ' + esc(m.feeDay) + ' 日起）</div>';
+      '<div style="font-size:12px;color:var(--text-3)">按卡年统计（自上个年费日 ' + esc(m.feeMonth) + ' 月 ' + esc(m.feeDay) + ' 日起）</div>';
+  } else if (w.kind === '消费刷免') {
+    // 只记笔数后金额门槛无法自动判定，改人工确认
+    feePolicyHtml = sliderHtml('toggle-manual-waiver-drawer', m.manualWaiver, m.manualWaiver ? '已达标' : '未达标 · 手动', '', m.id) +
+      '<div style="font-size:12px;color:var(--text-3);margin-top:4px">该卡要求刷满 ' + esc(m.waiverCondition || '0') + ' 元。本项目只记笔数、不记金额，请自行核对银行账单后点上方开关确认。</div>';
   } else if (w.kind === '积分抵扣') {
     feePolicyHtml = sliderHtml('toggle-points-drawer', m.pointsDeducted, m.pointsDeducted ? '已抵扣' : '未抵扣', m.pointsDeductDate, m.id);
   } else if (w.kind === '资产存免') {
@@ -1495,11 +1600,14 @@ function drawerHtml(m) {
     '<button class="btn small danger" data-act="del-mycard">删除持卡</button>' +
     '</div></div>' +
 
-    '<div class="drawer-section"><h3>每月刷卡任务</h3>' +
-    (m.monthlySpendTarget > 0
-      ? '<div class="progress"><div class="progress-track"><div class="progress-fill" style="width:' + m.monthProgress + '%"></div></div>' +
-        '<div class="progress-text"><span>本月消费 ' + fmtMoney(m.monthSpend) + '</span><span>目标 ' + fmtMoney(m.monthlySpendTarget) + '</span></div></div>'
-      : '<div style="font-size:13px;color:var(--text-3)">未设置月消费目标（编辑持卡可设置）</div>') +
+    '<div class="drawer-section"><h3>刷卡笔数</h3>' +
+    '<div class="chip-row" style="margin-top:0">' +
+    '<span class="stat-chip">本月 <b>' + fmtInt(m.monthCount) + '</b> 笔</span>' +
+    '<span class="stat-chip">本年 <b>' + fmtInt(m.yearCount) + '</b> 笔</span>' +
+    '<span class="stat-chip">本卡年 <b>' + fmtInt(m.cardYearCount) + '</b> 笔</span>' +
+    '<span class="stat-chip">累计 <b>' + fmtInt(m.totalCount) + '</b> 笔</span>' +
+    '</div>' +
+    '<div style="font-size:12px;color:var(--text-3)">只记笔数，不记金额与商户——表格里不会出现你的消费明细。</div>' +
     '</div>' +
 
     '<div class="drawer-section"><h3>年费信息</h3>' +
@@ -1512,32 +1620,20 @@ function drawerHtml(m) {
     (m.feeMonthsLeft != null ? '<div class="bill-hint">距年费约 ' + m.feeMonthsLeft + ' 个月</div>' : '') +
     '<div style="margin-top:10px">' + feePolicyHtml + '</div></div>' +
 
-    '<div class="drawer-section"><h3>消费记录</h3>' +
-    '<div class="chip-row">' +
-    '<span class="stat-chip">本月 <b>' + fmtMoney(m.monthSpend) + '</b> · ' + m.monthCount + ' 笔 <button class="btn small" data-act="detail-records" data-scope="month">本月明细</button></span>' +
-    '<span class="stat-chip">本年 <b>' + fmtMoney(m.yearSpend) + '</b> · ' + m.yearCount + ' 笔 <button class="btn small" data-act="detail-records" data-scope="year">本年明细</button></span>' +
-    '<span class="stat-chip">累计 <b>' + fmtMoney(m.totalSpend) + '</b> · ' + m.totalCount + ' 笔 <button class="btn small" data-act="detail-records" data-scope="all">累计明细</button></span>' +
-    '</div>' +
-    '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">' +
+    '<div class="drawer-section"><h3>刷卡记录（只记笔数）</h3>' +
+    '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center">' +
     '<button class="btn small primary" data-act="record-consumption">记一笔</button>' +
     '<span class="count-topup">补录笔数 <input type="number" id="count-topup-input" min="1" step="1" placeholder="笔数"> <button class="btn small" data-act="count-topup">保存</button></span>' +
+    '<button class="btn small" data-act="detail-records" data-scope="all">全部记录</button>' +
     '</div>' +
     (m.recent.length
-      ? '<table class="record-table"><thead><tr><th>日期</th><th>渠道</th><th>分类</th><th>备注</th><th style="text-align:right">金额</th></tr></thead><tbody>' +
-        m.recent.map((r) => '<tr><td>' + esc(r.date) + '</td><td>' + esc(r.channel) + '</td><td>' + esc(r.category) + '</td><td>' + esc(r.note || '') + '</td><td class="amount">' + fmtMoney(r.amount) + '</td></tr>').join('') +
-        '</tbody></table><div style="font-size:12px;color:var(--text-3);margin-top:4px">仅显示最近 5 条，更多见上方明细</div>'
-      : '<div style="font-size:13px;color:var(--text-3)">暂无消费记录</div>') +
+      ? '<table class="record-table"><thead><tr><th>日期</th><th style="text-align:right">笔数</th></tr></thead><tbody>' +
+        m.recent.map((r) => '<tr><td>' + esc(r.date) + '</td><td class="amount">' + fmtInt(r.count) + ' 笔</td></tr>').join('') +
+        '</tbody></table><div style="font-size:12px;color:var(--text-3);margin-top:4px">仅显示最近 5 条，更多见「全部记录」（可撤销）</div>'
+      : '<div style="font-size:13px;color:var(--text-3)">还没有记录，点「记一笔」或上方补录</div>') +
     '</div>' +
 
-    '<div class="drawer-section"><h3>账单流水</h3>' +
-    '<div class="chip-row" style="margin-top:0">' +
-    '<button class="btn small primary" data-act="bill-add">新增账单</button>' +
-    '<button class="btn small" data-act="bill-gen">生成本期账单</button>' +
-    '<span class="stat-chip">未还 <b>' + unpaidCount(m) + '</b> 笔</span>' +
-    '</div>' +
-    billsHtml(m) + '</div>' +
-
-    (m.billGroupId ? groupBillsSectionHtml(m) : '') +
+    (m.billGroupId ? groupSectionHtml(m) : '') +
 
     '<div class="drawer-section"><h3>权益使用明细</h3>' +
     (benefitsHtml || '<div style="font-size:13px;color:var(--text-3)">暂无权益（编辑持卡可添加）</div>') +
@@ -1550,149 +1646,25 @@ function infoItem(k, v) {
   return '<div class="info-item"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
 }
 
-/** 合并账单组视角：组内成员 + 按月合计（还款提醒按组只推 1 条） */
-function groupBillsSectionHtml(m) {
+/** 合并还款组：组内卡共用同一还款日，提醒按组合并为 1 条（不再逐卡推送） */
+function groupSectionHtml(m) {
   const members = groupMembersOf(m);
-  const rows = groupBillRows(m);
   const memberHtml = members.map((x) => '<span class="stat-chip">' + esc(x.alias || x.name) +
     (x.id === m.id ? '<span style="color:var(--text-3)">（当前）</span>' : '') + '</span>').join('');
-  return '<div class="drawer-section"><h3>合并账单组：' + esc(m.billGroupName || '未命名组') + '</h3>' +
-    '<div class="bill-hint">组内 ' + members.length + ' 张卡共用同一还款日，' +
-    '提醒按组合并为 1 条（不再逐卡推送）。组内卡的最后还款日：' + esc((m.payment && m.payment.lastPayDate) || '—') + '</div>' +
+  return '<div class="drawer-section"><h3>合并还款组：' + esc(m.billGroupName || '未命名组') + '</h3>' +
+    '<div class="bill-hint">组内 ' + members.length + ' 张卡共用同一还款日，还款提醒按组合并为 1 条：' +
+    esc((m.payment && m.payment.lastPayDate) || '—') + '</div>' +
     '<div class="chip-row">' + memberHtml + '</div>' +
-    (rows.length
-      ? '<table class="record-table"><thead><tr><th>月份</th><th>合计应还</th><th>到期日</th><th>未还</th></tr></thead><tbody>' +
-        rows.map((r) => '<tr><td>' + esc(r.month) + '</td>' +
-          '<td class="amount">' + fmtMoney(r.total) + '</td>' +
-          '<td>' + esc(r.dueDate || '—') + '</td>' +
-          '<td>' + (r.unpaid ? '<span class="badge badge-red">' + r.unpaid + ' 笔</span>' : '<span class="badge badge-green">已还清</span>') + '</td></tr>').join('') +
-        '</tbody></table>'
-      : '<div style="font-size:13px;color:var(--text-3)">组内暂无账单记录</div>') +
     '<div style="margin-top:10px;display:flex;gap:8px">' +
-    '<button class="btn small" data-act="group-edit" data-gid="' + esc(m.billGroupId) + '">管理账单组</button>' +
-    '<button class="btn small" data-act="group-leave" data-id="' + m.id + '">退出合并账单</button>' +
+    '<button class="btn small" data-act="group-edit" data-gid="' + esc(m.billGroupId) + '">管理分组</button>' +
+    '<button class="btn small" data-act="group-leave" data-id="' + m.id + '">退出合并</button>' +
     '</div></div>';
-}
-
-function myBills(m) {
-  // 按 myCardId 建一次索引：unpaid 筛选会对每张卡调 unpaidCount→myBills，
-  // 每次全量 filter 是 O(卡数 × 账单数)；state.bills 只在 loadAll 整体重赋值，缓存安全
-  let idx = state._billsByCard;
-  if (!idx) {
-    idx = state._billsByCard = new Map();
-    for (const b of state.bills || []) {
-      const arr = idx.get(b.myCardId);
-      if (arr) arr.push(b);
-      else idx.set(b.myCardId, [b]);
-    }
-    for (const arr of idx.values()) arr.sort((a, b) => (a.month < b.month ? 1 : -1));
-  }
-  return idx.get(m.id) || [];
 }
 
 function groupMembersOf(m) {
   if (!m.billGroupId) return [];
   return (state.myCards || []).filter((x) => x.billGroupId === m.billGroupId);
 }
-
-// 合并账单组：同月账单合计（组内还款日一致，到期日应相同）
-function groupBillRows(m) {
-  const members = groupMembersOf(m);
-  if (!members.length) return [];
-  const idSet = new Set(members.map((x) => x.id));
-  const byMonth = {};
-  for (const b of state.bills || []) {
-    if (!idSet.has(b.myCardId)) continue;
-    const e = byMonth[b.month] || (byMonth[b.month] = { month: b.month, total: 0, unpaid: 0, count: 0, dueDate: '', paidDate: '' });
-    e.total += Number(b.amount) || 0;
-    e.count++;
-    if (b.paid !== '已还') e.unpaid++;
-    // 到期日取最早（组内不一致时宁可提前提醒）
-    if (b.dueDate && (!e.dueDate || b.dueDate < e.dueDate)) e.dueDate = b.dueDate;
-    if (b.paidDate && (!e.paidDate || b.paidDate > e.paidDate)) e.paidDate = b.paidDate;
-  }
-  return Object.values(byMonth).sort((a, b) => (a.month < b.month ? 1 : -1));
-}
-
-function unpaidCount(m) {
-  return myBills(m).filter((b) => b.paid !== '已还').length;
-}
-
-function billsHtml(m) {
-  const list = myBills(m);
-  if (!list.length) return '<div style="font-size:13px;color:var(--text-3)">暂无账单记录（点「生成本期账单」快速创建）</div>';
-  return '<table class="record-table"><thead><tr><th>月份</th><th>金额</th><th>到期日</th><th>状态</th><th>操作</th></tr></thead><tbody>' +
-    list.map((b) => '<tr data-bill-id="' + b.id + '">' +
-      '<td>' + esc(b.month) + '</td>' +
-      '<td class="amount">' + fmtMoney(b.amount) + '</td>' +
-      '<td>' + esc(b.dueDate || '—') + '</td>' +
-      '<td><span class="badge ' + (b.paid === '已还' ? 'badge-green' : 'badge-red') + '">' + esc(b.paid) + '</span>' +
-      (b.paidDate ? '<div class="slider-date">' + esc(b.paidDate) + '</div>' : '') + '</td>' +
-      '<td><button class="btn small" data-act="bill-toggle">' + (b.paid === '已还' ? '标记未还' : '标记已还') + '</button> ' +
-      '<button class="btn small" data-act="bill-edit">编辑</button> ' +
-      '<button class="btn small danger" data-act="bill-del">删除</button></td></tr>').join('') +
-    '</tbody></table>';
-}
-
-async function openBillModal(m, bill) {
-  const editing = !!bill;
-  const p = m.payment || {};
-  const w = m.waiver || {};
-  // 刷免进度提示 + 账单→消费联动开关：
-  // 账单金额与消费明细是两条数据线，此前用户在账单里记账后期望年费达标联动，
-  // 但刷免进度只统计「记一笔」的消费记录，永远不动。这里给出显式联动入口。
-  let waiverHintHtml = '';
-  let linkageHtml = '';
-  if (w.kind === '消费刷免' || w.kind === '笔数刷免') {
-    const progressTxt = w.unit === '元'
-      ? fmtMoney(w.progress) + ' / ' + fmtMoney(w.target)
-      : fmtInt(w.progress) + ' / ' + fmtInt(w.target) + ' 笔';
-    waiverHintHtml = '<div class="bill-hint" style="margin:0 0 8px">年费刷免进度（卡年）：' + progressTxt +
-      (w.met ? '，已达标' : '') + '</div>';
-    if (w.kind === '消费刷免') {
-      // 卡年口径防双计：w.progress 与刷免进度同源（cardYearRecordsOf，自上个年费日起），
-      // 比自然年的 yearSpend 更准——feeMonth 非年初的卡，年初消费属上一卡年，不该抑制联动
-      // 编辑模式：显示该账单的当前联动状态（而非按"卡年已有消费"推导）
-      const hasYearSpend = editing ? !!bill.countAsSpend : (w.progress || 0) > 0;
-      linkageHtml = '<label class="switch-row" style="margin:4px 0 0"><input type="checkbox" id="b-count-spend"' + (hasYearSpend ? ' checked' : '') + '> ' +
-        '<span style="font-size:12px;color:var(--text-2)">账单金额计入刷免进度（勾选后将按账单金额记入消费记录）</span></label>';
-    } else {
-      linkageHtml = '<div style="font-size:12px;color:var(--text-3)">笔数刷免请在「记一笔」或「补录笔数」中累计笔数，账单金额不计入</div>';
-    }
-  }
-  openModal('<div class="modal-title">' + (editing ? '编辑账单 — ' : '新增账单 — ') + esc(m.alias || m.name) + '</div>',
-    waiverHintHtml +
-    '<div class="form-grid">' +
-    field('出账月份（YYYY-MM）', '<input id="b-month" value="' + esc(editing ? bill.month : (p.billMonth || '')) + '" placeholder="2026-10">') +
-    field('账单金额', '<input id="b-amount" type="number" min="0" step="0.01" value="' + esc(editing ? bill.amount : 0) + '">') +
-    field('到期还款日', '<input id="b-due" type="date" value="' + esc(editing ? (bill.dueDate || '') : (p.dueDate || '')) + '">') +
-    field('是否已还', '<select id="b-paid">' +
-      '<option' + (!editing || bill.paid !== '已还' ? ' selected' : '') + '>未还</option>' +
-      '<option' + (editing && bill.paid === '已还' ? ' selected' : '') + '>已还</option></select>') +
-    '</div>' + linkageHtml,
-    '<button class="btn" data-close>取消</button><button class="btn primary" id="b-save">保存</button>');
-  $('#b-save').addEventListener('click', (e) => submitLock(e.currentTarget, async () => {
-    const payload = {
-      month: $('#b-month').value.trim(),
-      amount: $('#b-amount').value,
-      dueDate: $('#b-due').value,
-      paid: $('#b-paid').value,
-    };
-    if ($('#b-count-spend')) payload.countAsSpend = $('#b-count-spend').checked;
-    try {
-      if (editing) {
-        await api('/api/bills/' + bill.id, { method: 'PUT', body: payload });
-        toast('账单已保存');
-      } else {
-        await api('/api/bills', { method: 'POST', body: Object.assign({ myCardId: m.id }, payload) });
-        toast('账单已添加');
-      }
-      closeModal();
-      await loadAll();
-    } catch (e) { toast(e.message, 'error'); }
-  }));
-}
-
 function sliderHtml(act, on, label, date, id) {
   return '<button class="slider-toggle' + (on ? ' on' : '') + '" data-act="' + act + '" data-id="' + id + '">' +
     '<span class="slider-track"><span class="slider-knob"></span></span>' +
@@ -1746,6 +1718,8 @@ function bindDrawerEvents(m) {
   if (pts) pts.addEventListener('click', () => togglePoints(m.id));
   const asset = $('[data-act="toggle-asset-drawer"]', drawer);
   if (asset) asset.addEventListener('click', () => toggleAsset(m.id));
+  const mw = $('[data-act="toggle-manual-waiver-drawer"]', drawer);
+  if (mw) mw.addEventListener('click', () => toggleManualWaiver(m.id));
 
   // 消费记录
   $('[data-act="record-consumption"]', drawer).addEventListener('click', () => openConsumptionModal(m));
@@ -1763,46 +1737,7 @@ function bindDrawerEvents(m) {
     btn.addEventListener('click', () => openRecordsModal(m, btn.dataset.scope));
   });
 
-  // 账单流水
-  const billAdd = $('[data-act="bill-add"]', drawer);
-  if (billAdd) billAdd.addEventListener('click', () => openBillModal(m));
-  const billGen = $('[data-act="bill-gen"]', drawer);
-  if (billGen) billGen.addEventListener('click', async () => {
-    try {
-      await api('/api/mycards/' + m.id + '/bills/generate', { method: 'POST', body: {} });
-      toast('已生成本期账单');
-      await loadAll();
-    } catch (e) { toast(e.message, 'error'); }
-  });
-  $$('[data-act="bill-toggle"]', drawer).forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const id = btn.closest('tr').dataset.billId;
-      const b = (state.bills || []).find((x) => x.id === id);
-      if (!b) return;
-      try {
-        await api('/api/bills/' + id, { method: 'PUT', body: { paid: b.paid === '已还' ? '未还' : '已还' } });
-        await loadAll();
-      } catch (e) { toast(e.message, 'error'); }
-    });
-  });
-  $$('[data-act="bill-edit"]', drawer).forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.closest('tr').dataset.billId;
-      const b = (state.bills || []).find((x) => x.id === id);
-      if (b) openBillModal(m, b);
-    });
-  });
-  $$('[data-act="bill-del"]', drawer).forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const id = btn.closest('tr').dataset.billId;
-      if (!(await confirmDialog('确定删除这条账单记录？'))) return;
-      try {
-        await api('/api/bills/' + id, { method: 'DELETE' });
-        toast('已删除');
-        await loadAll();
-      } catch (e) { toast(e.message, 'error'); }
-    });
-  });
+  // 账单模块已移除：不再有新增/生成/标记已还/编辑/删除账单的入口
 
   // 合并账单组
   const grpEdit = $('[data-act="group-edit"]', drawer);
@@ -2206,35 +2141,30 @@ function openMyCardModal(m) {
 
 // ---------- 弹窗：记一笔消费 ----------
 function openConsumptionModal(m) {
-  const channels = state.meta.channels || [];
-  const cats = state.meta.categories || [];
   openModal('<div class="modal-title">记一笔 — ' + esc(m.alias || m.name) + '</div>',
     '<div class="form-grid">' +
     field('日期', '<input id="c-date" type="date" value="' + today() + '">') +
-    field('金额', '<input id="c-amount" type="number" min="0.01" step="0.01" placeholder="0.00">') +
-    field('支付渠道', '<select id="c-channel">' + channels.map((x) => '<option>' + x + '</option>').join('') + '</select>') +
-    field('消费分类', '<select id="c-category">' + cats.map((x) => '<option>' + x + '</option>').join('') + '</select>') +
-    field('备注（可选）', '<input id="c-note" placeholder="备注">') +
-    '</div>',
+    field('笔数', '<input id="c-count" type="number" min="1" step="1" value="1">') +
+    '</div>' +
+    '<div style="font-size:12px;color:var(--text-3);margin-top:8px">只记录笔数：不保存金额、商户、分类，也不生成账单。</div>',
     '<button class="btn" data-close>取消</button><button class="btn primary" id="btn-save-consumption">保存</button>');
   $('#btn-save-consumption').addEventListener('click', (e) => submitLock(e.currentTarget, async () => {
-    const amount = parseFloat($('#c-amount').value);
-    if (!amount || amount <= 0) return toast('请输入大于 0 的金额', 'error');
+    const count = parseInt($('#c-count').value, 10);
+    if (!count || count <= 0) return toast('请输入大于 0 的笔数', 'error');
     try {
-      await api('/api/mycards/' + m.id + '/consumptions', {
-        method: 'POST',
-        body: { date: $('#c-date').value, amount, channel: $('#c-channel').value, category: $('#c-category').value, note: $('#c-note').value.trim() },
+      await api('/api/mycards/' + m.id + '/consumptions/count', {
+        method: 'POST', body: { date: $('#c-date').value, count },
       });
-      toast('已记录');
+      toast('已记录 ' + count + ' 笔');
       closeModal();
       await loadAll();
     } catch (e) { toast(e.message, 'error'); }
   }));
 }
 
-// ---------- 弹窗：消费明细 ----------
+// ---------- 弹窗：刷卡记录（只记笔数） ----------
 async function openRecordsModal(m, scope) {
-  const titles = { month: '本月明细', year: '本年明细', all: '累计明细' };
+  const titles = { month: '本月记录', year: '本年记录', all: '全部记录' };
   let recs;
   try {
     const data = await api('/api/mycards/' + m.id + '/consumptions?scope=' + scope);
@@ -2247,18 +2177,16 @@ async function openRecordsModal(m, scope) {
   } else if (scope === 'month') {
     body = recordsTable(recs, true);
   } else if (scope === 'year') {
-    const byMonth = groupBy(recs, (r) => r.date.slice(0, 7));
-    body = byMonth.map(([k, list]) => groupHtml(k + ' 月', list, true)).join('');
+    body = groupBy(recs, (r) => r.date.slice(0, 7)).map(([k, list]) => groupHtml(k + ' 月', list, true)).join('');
   } else {
-    const byYear = groupBy(recs, (r) => r.date.slice(0, 4));
-    body = byYear.map(([y, list]) => {
+    body = groupBy(recs, (r) => r.date.slice(0, 4)).map(([y, list]) => {
       const byMonth = groupBy(list, (r) => r.date.slice(0, 7));
-      return '<div class="record-group"><div class="record-group-header" data-toggle><span class="collapse-arrow">▾</span>' + y + ' 年<span class="count">' + list.length + ' 笔</span><span class="sum">' + fmtMoney(sum(list)) + '</span></div>' +
+      return '<div class="record-group"><div class="record-group-header" data-toggle><span class="collapse-arrow">▾</span>' + y + ' 年' +
+        '<span class="count">' + fmtInt(sumCount(list)) + ' 笔</span></div>' +
         '<div class="record-group-body">' + byMonth.map(([k2, l2]) => groupHtml(k2 + ' 月', l2, true)).join('') + '</div></div>';
     }).join('');
   }
-  const total = recs.reduce((s, r) => s + r.amount, 0);
-  openModal('<div class="modal-title">' + titles[scope] + ' — ' + esc(m.alias || m.name) + '（共 ' + recs.length + ' 笔 / ' + fmtMoney(total) + '）</div>',
+  openModal('<div class="modal-title">' + titles[scope] + ' — ' + esc(m.alias || m.name) + '（共 ' + fmtInt(sumCount(recs)) + ' 笔）</div>',
     '<div class="scroll-y">' + body + '</div>',
     '<button class="btn primary" data-close>关闭</button>');
   bindRecordGroups($('#modal'));
@@ -2267,14 +2195,14 @@ async function openRecordsModal(m, scope) {
 
 function groupHtml(title, list, canDelete) {
   return '<div class="record-group"><div class="record-group-header" data-toggle><span class="collapse-arrow">▾</span>' + esc(title) +
-    '<span class="count">' + list.length + ' 笔</span><span class="sum">' + fmtMoney(sum(list)) + '</span></div>' +
+    '<span class="count">' + fmtInt(sumCount(list)) + ' 笔</span></div>' +
     '<div class="record-group-body">' + recordsTable(list, canDelete) + '</div></div>';
 }
 
 function recordsTable(recs, canDelete) {
-  return '<table class="record-table"><thead><tr><th>日期</th><th>渠道</th><th>分类</th><th>备注</th><th style="text-align:right">金额</th>' + (canDelete ? '<th></th>' : '') + '</tr></thead><tbody>' +
-    recs.map((r) => '<tr><td>' + esc(r.date) + '</td><td>' + esc(r.channel) + '</td><td>' + esc(r.category) + '</td><td>' + esc(r.note || '') + '</td><td class="amount">' + fmtMoney(r.amount) + '</td>' +
-      (canDelete ? '<td class="row-del"><button class="link-btn danger" data-cons-del="' + esc(r.id) + '" title="删除这条记录">删</button></td>' : '') +
+  return '<table class="record-table"><thead><tr><th>日期</th><th style="text-align:right">笔数</th>' + (canDelete ? '<th></th>' : '') + '</tr></thead><tbody>' +
+    recs.map((r) => '<tr><td>' + esc(r.date) + '</td><td class="amount">' + fmtInt(r.count) + ' 笔</td>' +
+      (canDelete ? '<td class="row-del"><button class="link-btn danger" data-cons-del="' + esc(r.id) + '" title="撤销这条记录">删</button></td>' : '') +
       '</tr>').join('') +
     '</tbody></table>';
 }
@@ -2283,10 +2211,10 @@ function bindRecordDelete(root, myCardId) {
   $$('[data-cons-del]', root).forEach((btn) => {
     btn.addEventListener('click', async () => {
       const id = btn.dataset.consDel;
-      if (!(await confirmDialog('确定删除这条消费记录？删除后统计与刷免进度将同步减少。'))) return;
+      if (!(await confirmDialog('撤销这条笔数记录？撤销后统计与刷免进度会同步减少。'))) return;
       try {
         await api('/api/mycards/' + myCardId + '/consumptions/' + id, { method: 'DELETE' });
-        toast('已删除');
+        toast('已撤销');
         closeModal();
         await loadAll();
       } catch (e) { toast(e.message, 'error'); }
@@ -2309,7 +2237,7 @@ function groupBy(arr, fn) {
   }
   return [...map.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
 }
-function sum(arr) { return arr.reduce((s, r) => s + (Number(r.amount) || 0), 0); }
+function sumCount(arr) { return arr.reduce((s, r) => s + (Number(r.count) || 0), 0); }
 
 // ---------- 弹窗：权益使用 ----------
 function openBenefitModal(m, idx) {

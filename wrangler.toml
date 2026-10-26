@@ -1,0 +1,37 @@
+name = "guanka-cf"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 前端 SPA：静态资源由 Workers Assets 托管（自动 ETag / 304 / gzip / brotli）
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# Worker 先行：/api/* 必须经过鉴权守卫
+run_worker_first = true
+
+# 单实例 Durable Object：全部业务状态与**会话表**集中一处，
+# 读-改-写串行化，等价单线程语义；会话表因此不需要额外的存储服务。
+[[durable_objects.bindings]]
+name = "GUANKA_DO"
+class_name = "GuankaDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GuankaDO"]
+
+# 提醒调度：每 10 分钟心跳（实际推送节奏仍由 notify 配置的 intervalMinutes 节流）
+[triggers]
+crons = ["*/10 * * * *"]
+
+# ─────────────────────────────────────────────────────────────
+# 部署前必须设置主令牌（不要写进本文件！本文件进版本库）：
+#   openssl rand -base64 32 | wrangler secret put AUTH_TOKEN
+#
+# 主令牌只用于登录，不会下发到浏览器：登录成功后签发的是一张独立的
+# 随机会话 Cookie，可单独吊销，也可以「全部设备下线」。
+#
+# 可选：推送端点覆盖
+# [vars]
+# NOTIFY_BARK_URL = "https://api.day.app"

@@ -1,14 +1,15 @@
 {
-  "name": "credit-card-manager-docker",
-  "version": "1.2.4",
-  "description": "管卡 — 信用卡管理工具（Docker 版）：卡种数据库 + 我的持卡 + 消费/权益记录 + 年费到期提醒",
-  "main": "server/index.js",
-  "scripts": {
-    "start": "node server/index.js"
-  },
-  "engines": {
-    "node": ">=18"
-  },
+  "name": "guanka-cf",
+  "version": "2.0.0",
+  "private": true,
+  "description": "管卡 CF — 信用卡年费与权益管理（Cloudflare Workers 版，只记消费笔数）",
   "license": "MIT",
-  "private": true
+  "scripts": {
+    "test": "node test/smoke.js",
+    "preflight": "node scripts/preflight.js",
+    "check-token": "node scripts/check-token.js",
+    "dev": "wrangler dev",
+    "deploy": "npm run preflight && wrangler deploy"
+  },
+  "devDependencies": {}
 }

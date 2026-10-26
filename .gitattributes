@@ -1,7 +1,8 @@
-# 统一行尾，避免 Windows/Linux 混用时 Dockerfile 与脚本出现 CRLF 问题
+# 统一换行符为 LF，避免 Windows 上 checkout 后整库「全被修改」
 * text=auto eol=lf
 
-# 明确二进制，不做行尾转换
 *.png binary
+*.jpg binary
 *.ico binary
-*.zip binary
+*.woff binary
+*.woff2 binary
