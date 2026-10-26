@@ -425,6 +425,20 @@ function pushHistory(cfg, entry) {
   if (cfg.history.length > 30) cfg.history = cfg.history.slice(0, 30);
 }
 
+/**
+ * 北京时间的「自然日」键（YYYY-MM-DD）。
+ *
+ * cron 是 UTC 的 `0 1 * * *` = 北京 09:00。判重必须落在北京日上：
+ * 若按 UTC 日算，北京时间 09:00 之前（UTC 还是前一天）会把「今天」误判成「昨天」，
+ * 导致同一天跑两遍；反过来在 00:00–08:00 之间手动检查后，当天 09:00 又会被判成
+ * 「昨天已检查过」而跳过。中国无夏令时，固定 +8 即可。
+ */
+function beijingDayKey(d) {
+  const x = d instanceof Date ? d : new Date(d);
+  if (!x || Number.isNaN(x.getTime())) return '';
+  return new Date(x.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
 module.exports = {
-  DEFAULT_CONFIG, normalizeConfig, collectReminders, runChecks, daysToRepay, todayStr,
+  DEFAULT_CONFIG, normalizeConfig, collectReminders, runChecks, daysToRepay, todayStr, beijingDayKey,
 };

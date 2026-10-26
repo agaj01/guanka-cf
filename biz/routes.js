@@ -2127,11 +2127,18 @@ async function runNotifyChecksInner(force) {
   const cfg = reminder.normalizeConfig(getNotifyRaw());
   if (!cfg.enabled) return { skipped: true, reason: '提醒未启用' };
   if (!force && cfg.lastCheckAt) {
-    const gap = (NOW().getTime() - new Date(cfg.lastCheckAt).getTime()) / 60000;
-    // 容差 10 分钟：cron 每天固定时刻触发，实际触发会差几秒（今天 09:00:02、昨天 08:59:58）。
-    // 严格按 gap >= intervalMinutes 判，间隔设成 1440 时会出现「今天差 4 秒没到 1440 分钟」
-    // → 直接跳过一整天。留容差后「每天 09:00」稳定成立。
-    if (gap < cfg.intervalMinutes - 10) return { skipped: true, reason: `距上次检查 ${Math.round(gap)} 分钟，未达 ${cfg.intervalMinutes} 分钟间隔` };
+    // 每天 09:00（北京时间）跑一次 → 按「北京自然日」判重，不用分钟差。
+    // 用分钟差会留下两类地雷：
+    //  1) 改了 cron 频次后 lastCheckAt 是旧频率留下的，明天的 gap 不满 1440 分钟，
+    //     会被判成「未达间隔」直接跳过一整天；
+    //  2) cron 每天固定时刻触发会差几秒（09:00:02 / 08:59:58），严格比 1440 分钟
+    //     同样会整天跳过。
+    // 按自然日判重两个问题都没有，语义也正是「一天只提醒一次」。
+    const lastDay = reminder.beijingDayKey(cfg.lastCheckAt);
+    const today = reminder.beijingDayKey(NOW());
+    if (lastDay && lastDay === today) {
+      return { skipped: true, reason: `今天（${today}，北京时间）已经检查过，每天 09:00 只跑一次` };
+    }
   }
   const idx = buildIndexes();
   const now = NOW();

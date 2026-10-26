@@ -200,14 +200,18 @@ async function main() {
   ok(!/getBills\(/.test(routesSrc), 'routes.js 无 getBills 残留');
   ok(!/'bills'/.test(routesSrc.replace(/\/\/.*$/gm, '')), 'routes.js 无 bills 数据集写入残留');
 
-  console.log('== 9. 提醒节流时钟一致性（P0 防回归）==');
-  ok(/NOW\(\)\.getTime\(\) - new Date\(cfg\.lastCheckAt\)/.test(routesSrc), '节流判断与写入同用 NOW 时钟');
+  console.log('== 9. 提醒判重（每天一次，P0 防回归）==');
+  ok(/beijingDayKey\(cfg\.lastCheckAt\)/.test(routesSrc) && /beijingDayKey\(NOW\(\)\)/.test(routesSrc),
+    '判重判断与写入同用北京自然日（不再用分钟差，ago 的 lastCheckAt 不会把整天跳过）');
   const out1 = await routes.runNotifyChecks(false);
-  ok(out1.skipped === false, '第 1 轮 cron 执行（lastCheckAt 为空不节流）');
+  ok(out1.skipped === false, '第 1 轮 cron 执行（lastCheckAt 为空不判重）');
   const notifyCfg = JSON.parse(JSON.stringify(store.readObject('notify', {})));
   ok(notifyCfg.lastCheckAt, 'lastCheckAt 已写入');
   const out2 = await routes.runNotifyChecks(false);
-  ok(out2.skipped === true, '第 2 轮 cron 被 interval 节流');
+  ok(out2.skipped === true, '第 2 轮 cron 被「同一天」判重跳过');
+  ok(/已经检查过/.test(out2.reason || ''), '跳过原因说明「今天已经检查过」');
+  const out3 = await routes.runNotifyChecks(true);
+  ok(out3.skipped === false, '「立即检查」(force) 无视当天判重');
 
   console.log('== 10. 会话与令牌轮换（安全防回归）==');
   const { SessionStore, SESSION_TTL_MS } = require(ROOT + '/src/session.js');
@@ -331,14 +335,23 @@ async function main() {
   const cronLine = (tomlSrc.match(/^crons\s*=\s*\[(.*?)\]/m) || [])[1] || '';
   ok(/0 1 \* \* \*/.test(cronLine), 'cron 为 "0 1 * * *"（UTC 01:00 = 北京 09:00）');
   ok(!/\*\//.test(cronLine), '已不再有 */N 的高频 cron');
-  const Rdef = require(ROOT + '/biz/reminder.js');
-  ok(Rdef.normalizeConfig({}).intervalMinutes === 1440, '默认防抖间隔 = 1440 分钟（一天）');
-  ok(Rdef.normalizeConfig({ intervalMinutes: 9999 }).intervalMinutes === 1440, '间隔上限钳到 1440');
-  ok(Rdef.normalizeConfig({ intervalMinutes: 5 }).intervalMinutes === 5, '间隔下限仍是 5（手动检查不会被锁死）');
-  // 节流容差：每天 09:00 触发会差几秒，没有容差会把整天跳过
-  const routesCode = codeOnly(fs.readFileSync(ROOT + '/biz/routes.js', 'utf8'));
-  ok(/gap < cfg\.intervalMinutes - 10/.test(routesCode), '节流留 10 分钟容差（否则「每天 09:00」可能整天跳过）');
   ok(!/\*\*/.test(tomlSrc.split('[triggers]')[0].split('\n').slice(-4).join('\n')), 'cron 注释里没有混入 Markdown 加粗');
+
+  const Rday = require(ROOT + '/biz/reminder.js');
+  ok(Rday.beijingDayKey(new Date('2026-10-26T01:00:00Z')) === '2026-10-26', 'beijingDayKey：UTC 01:00 → 北京同一天');
+  ok(Rday.beijingDayKey(new Date('2026-10-26T15:59:00Z')) === '2026-10-26', 'beijingDayKey：UTC 15:59 仍是北京 10-26（23:59）');
+  ok(Rday.beijingDayKey(new Date('2026-10-26T16:00:00Z')) === '2026-10-27', 'beijingDayKey：UTC 16:00 已跨到北京次日 00:00');
+  ok(Rday.beijingDayKey('bad') === '', 'beijingDayKey：非法输入返回空串（不会误判为同一天）');
+
+  // 判重必须按北京自然日：按分钟差会在「改 cron 频次」或「触发时间抖动」时整天跳过
+  const routesCode = codeOnly(fs.readFileSync(ROOT + '/biz/routes.js', 'utf8'));
+  ok(/beijingDayKey\(cfg\.lastCheckAt\)/.test(routesCode), 'runNotifyChecksInner 用北京自然日判重');
+  ok(!/gap < cfg\.intervalMinutes/.test(routesCode), '不再用分钟差判重（旧的 gap 比较已移除）');
+  ok(/昨天/.test(routesCode) || /已经检查过/.test(routesCode), '跳过时给出可读原因');
+
+  // 前端：调度说明是静态文案，不再暴露「防抖间隔」输入框
+  ok(!/n-interval/.test(appSrc), '界面已移除「防抖间隔」输入框');
+  ok(/自动检查节奏/.test(appSrc), '界面改为说明「自动检查节奏」');
 
   console.log('== 13. Bark 走 Worker secret 托管 ==');
   // DO 在每个请求入口把 env 写入 globalThis.ENV，这里模拟同样的注入方式

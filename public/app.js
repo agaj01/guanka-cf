@@ -1330,7 +1330,7 @@ function notifyModalHtml(cfg) {
     field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +
     field('月任务月末提醒天数（0=关闭）', '<input id="n-taskDays" type="number" min="0" value="' + esc(cfg.rules.taskRemainDays) + '">') +
     field('资产到期提前天数（0=关闭）', '<input id="n-assetDays" type="number" min="0" max="90" value="' + esc(cfg.rules.assetExpiryDays != null ? cfg.rules.assetExpiryDays : 7) + '">') +
-    field('防抖间隔（分钟，默认 1440 = 一天；只影响「立即检查」后多久才允许再跑，不影响每天 09:00 的定时）', '<input id="n-interval" type="number" min="5" max="1440" value="' + esc(cfg.intervalMinutes) + '">') +
+    field('自动检查节奏', '<div style="font-size:12px;color:var(--text-2);line-height:1.7">每天 <b>09:00（北京时间）</b>由 Worker 定时触发一次，一轮推完当天所有待提醒项；同一天不会重复检查。上面「立即检查」是手动强制触发，不受此限制。</div>') +
     '</div></div>' +
     '<div class="notify-rules"><h4>日历订阅（ICS）</h4>' +
     '<div style="font-size:12px;color:var(--text-2);line-height:1.7;margin-bottom:8px">' +
@@ -1370,7 +1370,8 @@ async function openNotifyModal() {
   const $n = (id) => document.getElementById(id);
   const collect = () => ({
     enabled: !!($n('n-enabled') && $n('n-enabled').checked),
-    intervalMinutes: Number($n('n-interval').value) || 1440,
+    // intervalMinutes 不再由界面控制：检查节奏固定为 cron 每天 09:00，
+    // 判重按北京自然日（见 runNotifyChecksInner），提交时不再覆盖该字段。
     channels: {
       wxpusher: { enabled: $n('nc-wxpusher-enabled').checked, appToken: $n('nc-wxpusher-appToken').value.trim(), uids: $n('nc-wxpusher-uids').value.trim(), topicIds: $n('nc-wxpusher-topicIds').value.trim(), summaryPrefix: $n('nc-wxpusher-summaryPrefix').value.trim() },
       serverchan: { enabled: $n('nc-serverchan-enabled').checked, sendkey: $n('nc-serverchan-sendkey').value.trim() },
