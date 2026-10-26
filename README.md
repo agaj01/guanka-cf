@@ -55,25 +55,54 @@
 
 ## 部署
 
+线上地址：<https://card.agaj.eu.org>（自定义域名，已写在 `wrangler.toml` 的 `routes` 里）
+
+### 方式一：连 GitHub 自动部署（推荐）
+
+Cloudflare 的 Workers Builds 会在每次 push 到 `main` 时自动构建并部署。**这一步只能在
+Dashboard 点击完成** —— Workers Builds 的配置接口只接受 user 级 token，account 级
+API Token 调不通（`GET /accounts/{id}/builds/*` 恒返回 `12006 Invalid token`）。
+
+1. **先拿到 AUTH_TOKEN 并记下来**（后面要填两次一样的值）：
+   ```bash
+   openssl rand -base64 32
+   ```
+2. Dashboard → **Workers & Pages** → **Create** → **Import a repository**
+   （已有的 Worker 则进 `guanka-cf` → **Settings** → **Build** → Connect）
+3. 授权 GitHub → 选 `agaj01/guanka-cf` → 分支 `main` → 根目录留空
+4. 构建命令与部署命令填：
+
+   | 项 | 值 |
+   |---|---|
+   | Build command | `npm ci` |
+   | Deploy command | `npm run deploy:ci` |
+
+   `deploy:ci` = `preflight`（含 104 项冒烟测试）+ `wrangler deploy`，
+   测试不过就不会上线。注意不要用默认的 `npx wrangler deploy`，那样会跳过测试。
+5. 保存 → 首次构建会自动跑起来，`routes` 里的 `custom_domain` 会顺带把 DNS 与证书建好
+6. 构建完再去 **Settings → Variables and Secrets** 加 `AUTH_TOKEN`（类型选 **Secret**），
+   然后 **Deployments → Retry deployment** 让它生效
+
+以后改代码只需 `git push`，Cloudflare 侧自动重新构建部署。构建日志在 Worker 详情页的
+**Deployments** 标签里，失败原因（测试挂掉、配置错）都在里面。
+
+### 方式二：本地 CLI 部署
+
+```bash
+wrangler login
+openssl rand -base64 32 | wrangler secret put AUTH_TOKEN   # secret 不能写进文件
+npm run deploy
+```
+
+`npm run deploy` = `npm run preflight && wrangler deploy`。自检不通过会直接终止，不会把半成品推上线。
+CLI 部署与 Workers Builds 部署同一个 Worker，两种方式可以混用（secrets 是 Worker 级、不会互相覆盖）。
+
 ### 前置
 
 - Cloudflare 账号（免费版即可）
 - Node.js 18+ 与 `wrangler`（`npm i -g wrangler`，或用 `npx wrangler`）
 - 一个够强的令牌：`openssl rand -base64 32`
 
-### 三步上线
-
-```bash
-wrangler login
-
-# 1. 设置访问令牌（这是 secret，不要写进任何文件）
-openssl rand -base64 32 | wrangler secret put AUTH_TOKEN
-
-# 2. 部署（会先跑一遍自检 + 104 项冒烟测试）
-npm run deploy
-```
-
-`npm run deploy` = `npm run preflight && wrangler deploy`。自检不通过会直接终止，不会把半成品推上线。
 
 ### 登录一次管多久
 
@@ -109,15 +138,20 @@ npm run dev            # wrangler dev，默认 http://127.0.0.1:8787
 
 本地 DO 数据落在 `.wrangler/state`，删掉即可重置。
 
-### 绑定自有域名
+### 自定义域名
 
-在 `wrangler.toml` 里填上路由（`workers_dev` / `preview_urls` 已默认关闭）：
+已配置为 `card.agaj.eu.org`：
 
 ```toml
-routes = [{ pattern = "cards.example.com", custom_domain = true }]
+workers_dev = false
+preview_urls = false
+routes = [{ pattern = "card.agaj.eu.org", custom_domain = true }]
 ```
 
-域名必须在同一个 Cloudflare 账号下。
+`custom_domain = true` 时 wrangler 会自己建 DNS 记录并签发证书，不需要手工加 CNAME。
+域名必须在同一个 Cloudflare 账号下的 zone 里（这里用的是 `agaj.eu.org`）。
+要换成别的域名，改这一行即可；`preflight` 会校验域名格式，也会在「关了 workers.dev
+却没配域名」时直接报错——那种情况部署后会打不开。
 
 **为什么默认关掉 workers.dev**：`*.workers.dev` 和预览 URL 属于 Cloudflare 自己的 zone，
 **Access 无法为它们建应用**（Access 只能保护你账号下已有 zone 里的主机名）。
@@ -125,7 +159,8 @@ routes = [{ pattern = "cards.example.com", custom_domain = true }]
 `npm run preflight` 会专门检查这一项。
 
 绑定自定义域名后建议再开一层 **Cloudflare Access**（邮箱白名单 + One-time PIN），
-这样即使主令牌泄露，攻击者也进不来。
+这样即使主令牌泄露，攻击者也进不来。想连令牌框都不用见，再按后文
+「Access 信任模式」填上 `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD` 即可。
 
 ---
 

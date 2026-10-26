@@ -40,7 +40,10 @@ ok(/crons\s*=/.test(toml), 'cron 触发器已声明（提醒调度）');
 // 开着它们 = Access 之外还有一扇没锁的门。这里不 fail（本地开发无所谓），但要吼一声。
 const devOn = !/workers_dev\s*=\s*false/.test(toml);
 const previewOn = !/preview_urls\s*=\s*false/.test(toml);
-const hasRoute = /routes\s*=/.test(toml.replace(/^\s*#.*$/gm, ''));
+// 只看未被注释掉的 routes = [...]
+const routeLines = (toml.replace(/^\s*#.*$/gm, '').match(/routes\s*=\s*\[[^\]]*\]/g) || []).join(' ');
+const routeHosts = (routeLines.match(/pattern\s*=\s*"([^"]+)"/g) || [])
+  .map((x) => x.replace(/.*"([^"]+)"/, '$1'));
 if (devOn || previewOn) {
   console.log('  ⚠️  ' + [devOn ? 'workers_dev' : '', previewOn ? 'preview_urls' : ''].filter(Boolean).join(' + ') +
     ' 未关闭 —— 这些域名 Access 保护不到，等于绕过鉴权的公开入口');
@@ -48,8 +51,17 @@ if (devOn || previewOn) {
 } else {
   ok(true, 'workers_dev / preview_urls 已关闭（公网只有自定义域名一个入口）');
 }
-if (!hasRoute) {
-  console.log('  ⚠️  wrangler.toml 里没有 routes —— 只关 workers_dev 不配域名的话，Worker 部署后无入口');
+
+// 关了 workers.dev 又没配域名 = 部署成功但打不开，属于硬错误（建了连不上的东西）
+const needRoute = !devOn && !previewOn;
+if (routeHosts.length === 0) {
+  ok(!needRoute, '已配置自定义域名入口',
+    'workers_dev 与预览 URL 都关了却没有 routes —— 部署后没有任何入口可达');
+} else {
+  ok(routeHosts.every((h) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(h)),
+    '自定义域名格式合法：' + routeHosts.join(', '));
+  ok(!routeHosts.some((h) => /\.workers\.dev$/.test(h)),
+    '自定义域名不是 workers.dev（Access 保护不到那类域名）');
 }
 
 console.log('\n2) 关键文件');
