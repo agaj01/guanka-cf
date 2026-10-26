@@ -166,13 +166,13 @@ const CATEGORIES = ['餐饮', '购物', '交通', '加油', '超市', '旅行', 
 // 前 4 列（银行/卡片名称/卡组织/卡等级）是匹配卡种库的四元组，其余列是持卡人自己的数据。
 const MYCARD_FIELDS = [
   'bank', 'name', 'org', 'level',
-  'alias', 'last4', 'creditLimit', 'monthlySpendTarget',
+  'alias', 'last4', 'creditLimit', 'monthlyCountTarget',
   'billingDay', 'repayMode', 'repayValue', 'graceDays', 'maxInterestDays',
   'feeMonth', 'feeDay', 'waivedYear', 'countPeriodYear', 'benefits',
 ];
 const MYCARD_CSV_HEADER = [
   '银行', '卡片名称', '卡组织', '卡等级',
-  '别名', '卡号后四位', '授信额度', '月消费目标',
+  '别名', '卡号后四位', '授信额度', '本月目标笔数',
   '账单日', '还款方式', '还款值', '宽限期', '最长免息期',
   '年费收取月', '年费收取日', '已达标年份', '已刷核定期', '权益',
 ];
@@ -838,7 +838,7 @@ async function handle(method, pathname, url, body, req) {
         feeMonth: fee.m,
         feeDay: fee.d,
         last4: String(m.last4 || '').replace(/\D/g, '').slice(0, 4),
-        monthlySpendTarget: nonNeg(m.monthlySpendTarget, 0),
+        monthlyCountTarget: Math.max(0, Math.round(Number(m.monthlyCountTarget) || 0)),
         // 权益沿用备份里的稳定 id（消费/权益记录按 bid 归属），缺失时补新 id
         benefits: normalizeBenefits(Array.isArray(m.benefits) ? m.benefits : [], card.benefits),
         pointsDeducted: !!m.pointsDeducted,
@@ -1162,7 +1162,7 @@ async function handle(method, pathname, url, body, req) {
         feeMonth: fee.m,
         feeDay: fee.d,
         last4,
-        monthlySpendTarget: nonNeg(U.parseAmount(raw.monthlySpendTarget), 0),
+        monthlyCountTarget: Math.max(0, Math.round(Number(raw.monthlyCountTarget) || 0)),
         benefits: parseBenefitSpec(raw.benefits, card.benefits),
         pointsDeducted: false, pointsDeductDate: null,
         assetWaived: false, assetWaivedDate: null,
@@ -1222,7 +1222,7 @@ async function handle(method, pathname, url, body, req) {
       feeMonth: fee.m,
       feeDay: fee.d,
       last4: String(b.last4 || '').replace(/\D/g, '').slice(0, 4),
-      monthlySpendTarget: nonNeg(b.monthlySpendTarget, 0),
+      monthlyCountTarget: Math.max(0, Math.round(Number(b.monthlyCountTarget) || 0)),
       benefits: normalizeBenefits(b.benefits, card.benefits),
       pointsDeducted: false, pointsDeductDate: null,
       assetWaived: false, assetWaivedDate: null,
@@ -1268,7 +1268,9 @@ async function handle(method, pathname, url, body, req) {
       feeMonth: fee.m,
       feeDay: fee.d,
       last4: b.last4 != null ? String(b.last4).replace(/\D/g, '').slice(0, 4) : cur.last4,
-      monthlySpendTarget: b.monthlySpendTarget != null ? nonNeg(b.monthlySpendTarget, 0) : cur.monthlySpendTarget,
+      monthlyCountTarget: b.monthlyCountTarget != null
+        ? Math.max(0, Math.round(Number(b.monthlyCountTarget) || 0))
+        : (Number(cur.monthlyCountTarget) || 0),
       billGroupId: b.billGroupId != null ? String(b.billGroupId) : (cur.billGroupId || ''),
       // 年费/免年费快照可编辑（此前 PUT 静默丢弃这些字段：卡种快照建卡时若
       // 与实际不符——如「消费达标免年费」的卡被快照成积分抵扣——用户无法修正，

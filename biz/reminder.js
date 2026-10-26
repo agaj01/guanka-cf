@@ -1,7 +1,7 @@
 'use strict';
 
 /* 提醒引擎：生成提醒项 → 去重 → 推送 → 记录
- * 依赖注入：调用方传入「已计算的持卡列表」（含 feeDays/waiver/monthSpend 等），
+ * 依赖注入：调用方传入「已计算的持卡列表」（含 feeDays/waiver/monthCount 等），
  * 避免与 routes 形成循环依赖。
  */
 
@@ -143,12 +143,13 @@ function repayItem(m, days, now) {
 
 function taskItem(m, remainDays, gap, now) {
   const name = m.alias || m.name || '未命名卡片';
-  const title = `刷卡任务：${name} 还差 ¥${money(gap)}`;
+  const done = Number(m.monthCount) || 0;
+  const title = `刷卡任务：${name} 还差 ${gap} 笔`;
   const body = [
     `- 银行：${m.bank || '—'}`,
     `- 卡片：${m.name || '—'}${m.alias ? `（${m.alias}）` : ''}`,
-    `- 本月消费：¥${money(m.monthSpend)} / 目标 ¥${money(m.monthlySpendTarget)}`,
-    `- 还差：¥${money(gap)}（本月剩 ${remainDays} 天）`,
+    `- 本月已刷：${done} 笔 / 目标 ${m.monthlyCountTarget} 笔`,
+    `- 还差：${gap} 笔（本月剩 ${remainDays} 天）`,
   ].join('\n');
   const dd = (now || NOW());
   const ym = dd.getFullYear() + '-' + String(dd.getMonth() + 1).padStart(2, '0');
@@ -254,8 +255,11 @@ function collectReminders(cards, cfg, now, bills) {
       }
     }
     // ③ 月刷卡任务未达标（月末临近；按卡独立，不合并）
-    if (cfg.rules.taskRemainDays > 0 && m.monthlySpendTarget > 0) {
-      const gap = Math.max(0, Number(m.monthlySpendTarget) - Number(m.monthSpend || 0));
+    //    只记笔数后改按「本月笔数 vs 目标笔数」判定。原实现读 m.monthSpend，
+    //    该字段随金额记账一起移除后恒为 undefined → gap 永远等于目标值，
+    //    每月末必定误报「还差 ¥N」。
+    if (cfg.rules.taskRemainDays > 0 && Number(m.monthlyCountTarget) > 0) {
+      const gap = Math.max(0, Number(m.monthlyCountTarget) - (Number(m.monthCount) || 0));
       if (gap > 0 && remainDaysInMonth <= cfg.rules.taskRemainDays) items.push(taskItem(m, remainDaysInMonth, gap, now));
     }
   }

@@ -1309,7 +1309,7 @@ function notifyModalHtml(cfg) {
     '<div class="form-grid nc-body">' + fields.map((f) => field(f[1], '<input id="nc-' + key + '-' + f[0] + '"' + (f[2] === 'password' ? ' type="password"' : (f[2] === 'number' ? ' type="number"' : '')) + ' placeholder="' + esc(f[3] || '') + '" value="' + esc((c[key] && c[key][f[0]]) != null ? String(c[key][f[0]]) : '') + '">')).join('') + (extraHtml || '') + '</div></div>';
 
   return (
-    '<label class="switch-row"><input type="checkbox" id="n-enabled"' + (cfg.enabled ? ' checked' : '') + '> <b>启用提醒</b>（容器常驻进程定时检查，无需 cron）</label>' +
+    '<label class="switch-row"><input type="checkbox" id="n-enabled"' + (cfg.enabled ? ' checked' : '') + '> <b>启用提醒</b>（由 Workers Cron 每 10 分钟触发，下次检查在到达「检查间隔」后执行）</label>' +
     ch('wxpusher', 'WxPusher', '微信推送：wxpusher 后台获取 appToken，UID 为接收用户',
       [['appToken', 'appToken', 'password', 'AT_xxx'], ['uids', 'UID（多个用逗号分隔）', 'text', 'UID_xxx'], ['topicIds', '主题ID（可选）', 'text', ''], ['summaryPrefix', '消息前缀', 'text', '管卡提醒']]) +
     ch('serverchan', 'Server酱³', '微信/多端推送：sct.ftqq.com 获取 SendKey（SCT/SCU 开头）',
@@ -1324,7 +1324,7 @@ function notifyModalHtml(cfg) {
     field('还款日提前天数（0=关闭）', '<input id="n-repayDays" type="number" min="0" value="' + esc(cfg.rules.repayBeforeDays) + '">') +
     field('月任务月末提醒天数（0=关闭）', '<input id="n-taskDays" type="number" min="0" value="' + esc(cfg.rules.taskRemainDays) + '">') +
     field('资产到期提前天数（0=关闭）', '<input id="n-assetDays" type="number" min="0" max="90" value="' + esc(cfg.rules.assetExpiryDays != null ? cfg.rules.assetExpiryDays : 7) + '">') +
-    field('检查间隔（分钟，最小 5）', '<input id="n-interval" type="number" min="5" value="' + esc(cfg.intervalMinutes) + '">') +
+    field('检查间隔（分钟，最小 5；受 cron 每 10 分钟限制，实际最小 10）', '<input id="n-interval" type="number" min="5" value="' + esc(cfg.intervalMinutes) + '">') +
     '</div></div>' +
     '<div class="notify-rules"><h4>日历订阅（ICS）</h4>' +
     '<div style="font-size:12px;color:var(--text-2);line-height:1.7;margin-bottom:8px">' +
@@ -2003,7 +2003,7 @@ function myCardFormHtml(c, m) {
     field('别名（可选）', '<input id="f-alias" placeholder="给卡起个名字" value="' + esc(m ? m.alias : '') + '">') +
     field('卡号后四位（选填）', '<input id="f-last4" maxlength="4" placeholder="如 6688" value="' + esc(m ? m.last4 : '') + '">') +
     field('授信额度', '<input id="f-credit" type="number" min="0" step="1000" value="' + (m ? m.creditLimit : (c.startCredit || 0)) + '">') +
-    field('月消费目标（选填）', '<input id="f-target" type="number" min="0" step="1000" value="' + (m ? m.monthlySpendTarget : 0) + '">') +
+    field('本月目标笔数（选填）', '<input id="f-target" type="number" min="0" step="1" value="' + (m && m.monthlyCountTarget ? m.monthlyCountTarget : 0) + '">') +
     field('年费（元）', '<input id="f-annualfee" type="number" min="0" step="0.01" value="' + esc(curFee) + '" title="以此处为准（建卡时的卡种快照可能不准，可自行修正）">') +
     field('免年费类型', '<select id="f-waivertype">' + waiverTypes.map((t) => '<option' + (curWaiverType === t ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>') +
     field('刷免条件', '<input id="f-waivercondition" value="' + esc(curWaiverCondition) + '" placeholder="金额如 6万/60000、笔数如 10、积分如 10000" title="消费刷免/笔数刷免/积分抵扣/资产存免的达标门槛。改完后按卡年自动累计消费/笔数并联动达标状态">') +
@@ -2115,7 +2115,7 @@ async function saveMyCard(selected, editing) {
     alias: $('#f-alias', form).value.trim(),
     last4: $('#f-last4', form).value.trim(),
     creditLimit: $('#f-credit', form).value,
-    monthlySpendTarget: $('#f-target', form).value,
+    monthlyCountTarget: $('#f-target', form).value,
     annualFee: $('#f-annualfee', form) ? $('#f-annualfee', form).value : undefined,
     waiverType: $('#f-waivertype', form) ? $('#f-waivertype', form).value : undefined,
     waiverCondition: $('#f-waivercondition', form) ? $('#f-waivercondition', form).value.trim() : undefined,

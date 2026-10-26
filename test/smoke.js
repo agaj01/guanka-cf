@@ -294,6 +294,38 @@ async function main() {
   ok((await access.verifyJwt(data2.toString() + '.' + Buffer.from(sig2).toString('base64url'), cfg)).ok === false,
     '拒绝他人自签 JWT（无 CF 私钥无法伪造）');
 
+  console.log('== 12. 月刷卡任务按笔数判定（cron 提醒源）==');
+  const R = require(ROOT + '/biz/reminder.js');
+  const cfgTask = R.normalizeConfig({ rules: { taskRemainDays: 3 } });
+  const taskCard = { id: 'task-1', name: '测试卡', bank: '测试行', monthlyCountTarget: 5, monthCount: 2 };
+  const endOfAug = new Date(2026, 7, 30);
+  const midAug = new Date(2026, 7, 10);
+  const taskOf = (it) => it.filter((x) => x.type === 'task');
+
+  let titems = taskOf(R.collectReminders([taskCard], cfgTask, endOfAug, []));
+  ok(titems.length === 1, '月末临近且笔数未达标 → 生成任务提醒');
+  ok(/还差 3 笔/.test(titems[0].title), '标题按笔数计（5 目标 - 2 已刷）');
+  ok(!/¥/.test(titems[0].title + titems[0].body), '任务提醒不含任何金额符号');
+  ok(/已刷：2 笔/.test(titems[0].body), '正文显示本月已刷笔数');
+
+  titems = taskOf(R.collectReminders([Object.assign({}, taskCard, { monthCount: 5 })], cfgTask, endOfAug, []));
+  ok(titems.length === 0, '笔数已达标 → 不提醒');
+  titems = taskOf(R.collectReminders([Object.assign({}, taskCard, { monthlyCountTarget: 0 })], cfgTask, endOfAug, []));
+  ok(titems.length === 0, '未设目标笔数 → 不提醒');
+  titems = taskOf(R.collectReminders([taskCard], cfgTask, midAug, []));
+  ok(titems.length === 0, '距月末超过提醒天数 → 不提醒');
+
+  const icsSrc = fs.readFileSync(ROOT + '/biz/ics.js', 'utf8');
+  // 断言只看代码本体：注释里说明「原实现读 monthSpend」是必要的留档，不该被判为残留
+  const codeOnly = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  ok(!/monthlySpendTarget|monthSpend\b/.test(codeOnly(fs.readFileSync(ROOT + '/biz/reminder.js', 'utf8'))),
+    'reminder.js 无金额目标残留（否则月末必误报「还差 ¥N」）');
+  ok(!/monthlySpendTarget|monthSpend\b/.test(codeOnly(icsSrc)), 'ics.js 无金额目标残留（日历事件同口径）');
+  const appSrc = fs.readFileSync(ROOT + '/public/app.js', 'utf8');
+  ok(!/monthlySpendTarget/.test(appSrc), 'app.js 无金额目标残留');
+  ok(/本月目标笔数/.test(appSrc), '表单标签已改为「本月目标笔数」');
+  ok(/Workers Cron 每 10 分钟触发/.test(appSrc), '提醒设置页文案已说明由 Workers Cron 触发（原「容器常驻进程」已过时）');
+
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);
 }

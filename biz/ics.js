@@ -160,10 +160,11 @@ function collectEvents(computed, bills, now, assetData) {
       });
     }
 
-    // ③ 刷卡任务截止：有月度目标 → 当月最后一天
-    if (Number(m.monthlySpendTarget) > 0) {
+    // ③ 刷卡任务截止：有月度笔数目标 → 当月最后一天
+    if (Number(m.monthlyCountTarget) > 0) {
       const t = new Date(now.getFullYear(), now.getMonth() + 1, 0); // 当月月末
       const end = dstr(t);
+      const done = Number(m.monthCount) || 0;
       push({
         uid: 'guanka-task-' + m.id + '-' + end,
         date: end,
@@ -171,9 +172,9 @@ function collectEvents(computed, bills, now, assetData) {
         desc: [
           '银行：' + (m.bank || '—'),
           '卡片：' + name,
-          '本月目标：¥' + money(m.monthlySpendTarget),
-          '已消费：¥' + money(m.monthSpend),
-          '还差：¥' + money(Math.max(0, Number(m.monthlySpendTarget) - Number(m.monthSpend || 0))),
+          '本月目标：' + m.monthlyCountTarget + ' 笔',
+          '已刷：' + done + ' 笔',
+          '还差：' + Math.max(0, Number(m.monthlyCountTarget) - done) + ' 笔',
         ].join('\n'),
       });
     }

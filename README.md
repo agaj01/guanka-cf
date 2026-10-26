@@ -19,7 +19,7 @@
 | 3 | **令牌强度** | preflight 只 grep `wrangler.toml` 里有没有 `AUTH_TOKEN` 字样（连注释都算命中），设成 `1210` 也照样打印「可以 deploy」 | preflight 做真实结构自检；`scripts/check-token.js` 独立体检；运行期日志告警 + 登录后界面提示条 |
 | 4 | **登录限流** | 固定 5 次/60 秒，计数存在内存，Worker 重启即清零 | 指数退避（60s 起，每次翻倍，上限 1h）并**持久化到 DO Storage**，重启不清零 |
 | 5 | **部署形态** | 仓库同时含 Docker 版与 Workers 版 | 仅 Workers 版，目录结构直接对齐 `wrangler.toml` |
-| 6 | **消费记账** | 记录金额、账单日、账单流水、每月刷卡任务 | **只记消费笔数**，不涉及任何金额与账单；账单接口与账单页整体移除 |
+| 6 | **消费记账** | 记录金额、账单日、账单流水、每月刷卡任务 | **只记消费笔数**，不涉及任何金额与账单；账单接口与账单页整体移除；「月消费目标 ¥」改为「本月目标笔数」，月末提醒、日历事件同口径按笔数 |
 | 7 | **持卡页排序** | 按名称/年费/还款/银行 | 新增「**年费未达标优先**」（默认）与「**按免息期长**」 |
 | 8 | 请求体上限 | — | 超 20MB 在 Worker 层直接 413，不产生 DO 子请求 |
 | 9 | **Access 集成** | 只建议「前置 Access」，但代码不认识它 —— Access 放行的请求和不放行的请求在应用看来一模一样 | 可选开启**信任模式**：自己验 `Cf-Access-Jwt-Assertion` 的 RS256 签名 + `aud` + `exp`，验过即登录，打开页面不再输令牌 |
@@ -65,7 +65,7 @@
 | 自定义域名 | `card.agaj.eu.org`，`custom_domain = true`，DNS 记录与证书由 wrangler 自动创建 |
 | Git 自动部署 | 已连接 `agaj01/guanka-cf`，生产分支 `main` |
 | 构建命令 | `npm ci` |
-| 部署命令 | `npm run deploy:ci`（= preflight + 104 项冒烟 + `wrangler deploy`） |
+| 部署命令 | `npm run deploy:ci`（= preflight + 116 项冒烟 + `wrangler deploy`） |
 | 定时触发 | 每 10 分钟（提醒调度） |
 | AUTH_TOKEN | 存在 Worker 上（Secret）。CI 部署不会覆盖 secret，只有手动改才会变 |
 
@@ -304,7 +304,7 @@ wrangler secret put ACCESS_AUD           # 64 位十六进制
 │   ├── reminder.js  ics.js  notifier.js  auth.js
 ├── public/                # 前端 SPA（无框架、无构建）
 ├── scripts/               # preflight.js / check-token.js
-└── test/                  # smoke.js（104 项）/ repro-store.js
+└── test/                  # smoke.js（116 项）/ repro-store.js
 ```
 
 **关于 `biz/`**：这是把上游 `server/*.js` 打补丁后固化的结果，补丁只有三类 ——
@@ -316,7 +316,7 @@ wrangler secret put ACCESS_AUD           # 64 位十六进制
 ## 脚本
 
 ```bash
-npm test                 # 104 项冒烟测试（业务层 + 定制点防回归）
+npm test                 # 116 项冒烟测试（业务层 + 定制点防回归）
 npm run preflight        # 部署前自检：配置结构 / 关键文件 / 冒烟 / 令牌提示
 npm run check-token      # 令牌强度体检
 
