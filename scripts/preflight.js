@@ -36,6 +36,22 @@ ok(/\[assets\]/.test(toml) && /directory\s*=\s*"\.\/public"/.test(toml), 'Assets
 ok(/run_worker_first\s*=\s*true/.test(toml), 'run_worker_first=true（/api/* 必过鉴权守卫）');
 ok(/crons\s*=/.test(toml), 'cron 触发器已声明（提醒调度）');
 
+// 公网入口：workers.dev / 预览 URL 属于 Cloudflare 的 zone，Access 覆盖不到，
+// 开着它们 = Access 之外还有一扇没锁的门。这里不 fail（本地开发无所谓），但要吼一声。
+const devOn = !/workers_dev\s*=\s*false/.test(toml);
+const previewOn = !/preview_urls\s*=\s*false/.test(toml);
+const hasRoute = /routes\s*=/.test(toml.replace(/^\s*#.*$/gm, ''));
+if (devOn || previewOn) {
+  console.log('  ⚠️  ' + [devOn ? 'workers_dev' : '', previewOn ? 'preview_urls' : ''].filter(Boolean).join(' + ') +
+    ' 未关闭 —— 这些域名 Access 保护不到，等于绕过鉴权的公开入口');
+  console.log('     → 除非你只想先用 workers.dev 试用，否则请设为 false 并绑定自有域名');
+} else {
+  ok(true, 'workers_dev / preview_urls 已关闭（公网只有自定义域名一个入口）');
+}
+if (!hasRoute) {
+  console.log('  ⚠️  wrangler.toml 里没有 routes —— 只关 workers_dev 不配域名的话，Worker 部署后无入口');
+}
+
 console.log('\n2) 关键文件');
 for (const f of ['src/worker.js', 'src/do.js', 'src/auth.js', 'src/session.js',
   'biz/routes.js', 'public/index.html', 'public/app.js']) {

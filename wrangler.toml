@@ -3,6 +3,17 @@ main = "src/worker.js"
 compatibility_date = "2024-11-01"
 compatibility_flags = ["nodejs_compat"]
 
+# ── 公网入口 ──────────────────────────────────────────────────────────
+# 关掉 workers.dev 与预览 URL。这两个域名属于 Cloudflare 自己的 zone，
+# **Cloudflare Access 无法为它们建应用**（Access 只能保护你账号下 zone 里的主机名）。
+# 开着它们，等于在 Access 之外留了一扇永远不锁的门。
+workers_dev = false
+preview_urls = false
+
+# 绑定自有域名（换成你的域名，必须已在本账号托管）。
+# 注意：workers_dev=false 且不配 routes 时，Worker 会部署成功但没有任何入口。
+# routes = [{ pattern = "cards.example.com", custom_domain = true }]
+
 # 前端 SPA：静态资源由 Workers Assets 托管（自动 ETag / 304 / gzip / brotli）
 [assets]
 directory = "./public"

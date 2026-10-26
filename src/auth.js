@@ -81,6 +81,19 @@ async function checkCalendarToken(env, given) {
   return safeEqualStr(String(given || ''), expect);
 }
 
+/**
+ * 主令牌指纹：把会话绑定到「签发它时的那个令牌」。
+ * 换 AUTH_TOKEN 后指纹随之改变，所有旧会话立即失效——
+ * 否则令牌泄露后轮换令牌是无效动作，攻击者手里的会话还能再活 30 天。
+ * 只存指纹不存令牌；SHA-256 之后再截断，无法反推原令牌。
+ */
+async function tokenFingerprint(env) {
+  const token = masterToken(env);
+  if (!token) return '';
+  const buf = await crypto.subtle.digest('SHA-256', enc('guanka-session-v1:' + token));
+  return base64url(new Uint8Array(buf)).slice(0, 16);
+}
+
 /* ---------------- Cookie ---------------- */
 
 function parseCookies(req) {
@@ -139,7 +152,7 @@ module.exports = {
   COOKIE_NAME, SESSION_TTL_MS,
   sha256Bytes, constantTimeEqual, safeEqualStr, randomId,
   authEnabled, checkMasterToken, masterToken,
-  calendarToken, checkCalendarToken,
+  calendarToken, checkCalendarToken, tokenFingerprint,
   parseCookies, sidOf, bearerOf, sessionCookie, clearCookie,
   sameOrigin, clientIp, inspectTokenStrength,
 };

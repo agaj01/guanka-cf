@@ -26,21 +26,33 @@ class SessionStore {
 
   /* ---------------- 会话 ---------------- */
 
-  async create(sid, ip, ua) {
+  async create(sid, ip, ua, tokenFp) {
     const now = Date.now();
-    const rec = { createdAt: now, lastSeen: now, ip: String(ip || ''), ua: String(ua || '').slice(0, 180) };
+    const rec = {
+      createdAt: now, lastSeen: now,
+      tokenFp: String(tokenFp || ''),
+      ip: String(ip || ''), ua: String(ua || '').slice(0, 180),
+    };
     await this.storage.put(SESSION_PREFIX + sid, rec);
     return rec;
   }
 
-  /** 取有效会话；过期/不存在返回 null（顺手清理过期项） */
-  async get(sid) {
+  /**
+   * 取有效会话；过期/不存在/令牌已轮换返回 null（顺手清理该条）。
+   * tokenFp 是签发时主令牌的指纹，不匹配说明 AUTH_TOKEN 换过了——
+   * 此时立刻作废，让「轮换令牌」真正能踢掉所有旧设备。
+   */
+  async get(sid, tokenFp) {
     if (!sid) return null;
     const key = SESSION_PREFIX + sid;
     const rec = await this.storage.get(key);
     if (!rec) return null;
     const now = Date.now();
     if (!rec.createdAt || now - rec.createdAt > SESSION_TTL_MS) {
+      await this.storage.delete(key);
+      return null;
+    }
+    if (!rec.tokenFp || rec.tokenFp !== String(tokenFp || '')) {
       await this.storage.delete(key);
       return null;
     }

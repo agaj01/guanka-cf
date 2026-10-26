@@ -209,6 +209,22 @@ async function main() {
   const out2 = await routes.runNotifyChecks(false);
   ok(out2.skipped === true, '第 2 轮 cron 被 interval 节流');
 
+  console.log('== 10. 会话与令牌轮换（安全防回归）==');
+  const { SessionStore, SESSION_TTL_MS } = require(ROOT + '/src/session.js');
+  const sess = new SessionStore({ storage: new MockStorage() });
+  await sess.create('sid-aaa', '1.2.3.4', 'UA/1', 'fp-old');
+  ok(!!(await sess.get('sid-aaa', 'fp-old')), '同令牌指纹可取到会话');
+  ok((await sess.get('sid-aaa', 'fp-new')) === null, '换令牌后旧会话立即失效');
+  ok((await sess.get('sid-aaa', 'fp-old')) === null, '失效会话已被删除（不会复活）');
+  await sess.create('sid-bbb', '1.2.3.4', 'UA/1', 'fp-old');
+  ok((await sess.get('sid-bbb', '')) === null, '缺指纹（升级前的老会话）一律失效');
+  await sess.create('sid-old', '1.2.3.4', 'UA/1', 'fp-old');
+  const raw = await sess.storage.get('sess:sid-old');
+  raw.createdAt = Date.now() - SESSION_TTL_MS - 1000;
+  await sess.storage.put('sess:sid-old', raw);
+  ok((await sess.get('sid-old', 'fp-old')) === null, '超过 30 天绝对有效期失效');
+  ok(!/fp-old/.test(fs.readFileSync(ROOT + '/src/auth.js', 'utf8')), 'auth.js 不含任何硬编码指纹');
+
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);
 }

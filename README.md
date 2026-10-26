@@ -66,13 +66,32 @@ wrangler login
 # 1. 设置访问令牌（这是 secret，不要写进任何文件）
 openssl rand -base64 32 | wrangler secret put AUTH_TOKEN
 
-# 2. 部署（会先跑一遍自检 + 76 项冒烟测试）
+# 2. 部署（会先跑一遍自检 + 82 项冒烟测试）
 npm run deploy
 ```
 
 `npm run deploy` = `npm run preflight && wrangler deploy`。自检不通过会直接终止，不会把半成品推上线。
 
-首次访问会要求输入令牌；登录后进入持卡页。
+### 登录一次管多久
+
+`AUTH_TOKEN` 就是**打开页面时输入的那个字符串**（不是 Cloudflare 账号密码，也不是 Access 的验证码）。
+
+```bash
+openssl rand -base64 32        # 生成一个，例如 Xk9mQp2vLxT4nRb7YwHc5JdF8sGa1Ve=
+wrangler secret put AUTH_TOKEN # 粘贴进去，这就是你以后登录用的「密码」
+```
+
+| 时刻 | 发生什么 |
+|---|---|
+| 第一次打开页面 | 弹「需要访问令牌」，粘贴上面那个值 |
+| 输错 5 次 | 该 IP 锁 60 秒，再错翻倍，封顶 1 小时 |
+| 登录成功 | 服务端签发 32 字节随机会话 id 写进 `HttpOnly` Cookie；主令牌**不再**留在浏览器里 |
+| 之后 30 天内 | 直接进入，无需再输（Cookie 绝对有效期 30 天，不因访问而延长） |
+| 满 30 天 | 重新输一次 |
+| 换了 `AUTH_TOKEN` | 所有设备的下一次请求立刻 401，全部重新登录 |
+
+脚本/自动化不必走登录：请求头带 `Authorization: Bearer <AUTH_TOKEN>` 即可，权限等价于网页登录。
+日历订阅用的是另一套派生令牌（界面里「日历订阅」处取），只能读日历、不能写。
 
 ### 本地开发
 
@@ -86,14 +105,21 @@ npm run dev            # wrangler dev，默认 http://127.0.0.1:8787
 
 ### 绑定自有域名
 
-在 `wrangler.toml` 里加：
+在 `wrangler.toml` 里填上路由（`workers_dev` / `preview_urls` 已默认关闭）：
 
 ```toml
 routes = [{ pattern = "cards.example.com", custom_domain = true }]
 ```
 
-域名必须在同一个 Cloudflare 账号下。绑定自定义域名后建议再开一层 **Cloudflare Access**（邮箱白名单 + One-time PIN），
-这样即使令牌泄露，攻击者也进不来。
+域名必须在同一个 Cloudflare 账号下。
+
+**为什么默认关掉 workers.dev**：`*.workers.dev` 和预览 URL 属于 Cloudflare 自己的 zone，
+**Access 无法为它们建应用**（Access 只能保护你账号下已有 zone 里的主机名）。
+留着它们，等于在 Access 之外还有一扇不锁的门，前面做得再严也白搭。
+`npm run preflight` 会专门检查这一项。
+
+绑定自定义域名后建议再开一层 **Cloudflare Access**（邮箱白名单 + One-time PIN），
+这样即使主令牌泄露，攻击者也进不来。
 
 ---
 
@@ -107,7 +133,8 @@ routes = [{ pattern = "cards.example.com", custom_domain = true }]
 | 机制 | 说明 |
 |---|---|
 | 会话与令牌分离 | Cookie 里只有随机 sid，`HttpOnly; Secure; SameSite=Lax`；不含任何可推导主令牌的信息 |
-| 会话表 | 存 DO Storage，30 天绝对有效期 + 活跃滑动续期；界面里能看到「登录设备」并逐个踢下线 |
+| 会话表 | 存 DO Storage，30 天**绝对**有效期（`lastSeen` 只用于展示，不延长寿命）；界面里能看到「登录设备」并逐个踢下线 |
+| 会话绑定令牌 | 每条会话记录存签发时主令牌的 SHA-256 指纹；`wrangler secret put AUTH_TOKEN` 换值后，所有旧会话在下一次请求时即被删除 —— 否则「令牌泄露→轮换令牌」等于没做 |
 | 主令牌不认 URL | `?token=<主令牌>` 一律 401 —— 避免进浏览器历史、Referer、CDN 日志 |
 | 日历派生令牌 | `HMAC-SHA256(AUTH_TOKEN, 'guanka-calendar-v1')` 取前 32 字符；只能读 `/api/calendar.ics`，写操作 401 |
 | 恒时比较 | 双 SHA-256 后逐字节异或累积，长度与内容差异都不走时间侧信道 |
@@ -117,6 +144,27 @@ routes = [{ pattern = "cards.example.com", custom_domain = true }]
 | 最小信息面 | `/api/health` 只回 `{ok:true}`，不暴露版本号 |
 | 内部端点 | `/__cron/checks` 仅在 DO 内部存在，且要求 `x-gk-cron: 1`；Worker 只转发 `/api/*`，公网无法命中 |
 | 请求体上限 | 20MB，Worker 层先拦（避免为超大请求建立 DO 子请求） |
+
+### Access 能替代 AUTH_TOKEN 吗
+
+不能，两者防的东西不一样：
+
+| | Cloudflare Access | AUTH_TOKEN（应用层） |
+|---|---|---|
+| 身份粒度 | 邮箱 / IdP 账号 | 这一个人的库 |
+| 保护对象 | 网络边界：谁能**到达** Worker | 应用边界：谁能**读数据**、会话怎么吊销 |
+| 生命周期 | 边缘会话（默认 24h） | 30 天绝对有效期，可逐台下线 / 全部下线；换令牌即刻全失效 |
+| 拦住谁 | 没有白名单邮箱的人 | 所有人 —— 包括绕过 Access 的那几条路 |
+
+Access 盖不住的四个口子：
+
+1. **`*.workers.dev` 与预览 URL** —— 不属于你的 zone，Access 建不了应用。这是最常见的翻车点，所以 `workers_dev` 默认关掉
+2. **日历订阅** —— Google/Outlook 的服务器来拉 `/api/calendar.ics`，不可能过 OTP。这条路径只能靠应用层派生令牌
+3. **脚本 / API** —— 用 `Authorization: Bearer` 调接口的客户端没有浏览器，走不了 One-time PIN
+4. **Access 自己配错** —— 策略写成 `Everyone`、域名写错、应用被删，Worker 立刻变全公开，而应用层没有任何第二道闸
+
+所以正确的姿势是**两层都留**：Access 挡人，AUTH_TOKEN 挡路径并管理身份。
+真要只留 Access，至少得先改代码去验 `Cf-Access-Jwt-Assertion` 签名（JWKS + aud + exp），否则无法区分"经过 Access 的请求"和"伪造头部的请求"。
 
 ---
 
@@ -171,7 +219,7 @@ routes = [{ pattern = "cards.example.com", custom_domain = true }]
 │   ├── reminder.js  ics.js  notifier.js  auth.js
 ├── public/                # 前端 SPA（无框架、无构建）
 ├── scripts/               # preflight.js / check-token.js
-└── test/                  # smoke.js（76 项）/ repro-store.js
+└── test/                  # smoke.js（82 项）/ repro-store.js
 ```
 
 **关于 `biz/`**：这是把上游 `server/*.js` 打补丁后固化的结果，补丁只有三类 ——
@@ -183,7 +231,7 @@ routes = [{ pattern = "cards.example.com", custom_domain = true }]
 ## 脚本
 
 ```bash
-npm test                 # 76 项冒烟测试（业务层 + 定制点防回归）
+npm test                 # 82 项冒烟测试（业务层 + 定制点防回归）
 npm run preflight        # 部署前自检：配置结构 / 关键文件 / 冒烟 / 令牌提示
 npm run check-token      # 令牌强度体检
 

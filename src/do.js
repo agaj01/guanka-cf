@@ -98,7 +98,7 @@ export class GuankaDO {
 
     const sid = auth.sidOf(request);
     if (sid) {
-      const rec = await this.sessions.get(sid);
+      const rec = await this.sessions.get(sid, await auth.tokenFingerprint(this.env));
       if (rec) return { ok: true, sid, rec, via: 'session' };
     }
 
@@ -124,7 +124,7 @@ export class GuankaDO {
     if (!enabled) return resp(200, { authRequired: true, authorized: false, configured: false });
     const sid = auth.sidOf(request);
     let authorized = false;
-    if (sid) authorized = !!(await this.sessions.get(sid));
+    if (sid) authorized = !!(await this.sessions.get(sid, await auth.tokenFingerprint(this.env)));
     if (!authorized) {
       const bearer = auth.bearerOf(request);
       if (bearer) authorized = await auth.checkMasterToken(this.env, bearer);
@@ -169,7 +169,9 @@ export class GuankaDO {
 
     await this.sessions.reset(ip);
     const sid = auth.randomId();
-    await this.sessions.create(sid, ip, request.headers.get('user-agent') || '');
+    // 会话绑定当前令牌指纹：换 AUTH_TOKEN 后旧会话自动全部失效
+    await this.sessions.create(sid, ip, request.headers.get('user-agent') || '',
+      await auth.tokenFingerprint(this.env));
     return respWith(200, { ok: true }, { 'Set-Cookie': auth.sessionCookie(sid) });
   }
 
