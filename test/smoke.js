@@ -372,6 +372,38 @@ async function main() {
     '用户自己填的 deviceKey 不会被误剥');
   delete globalThis.ENV;
 
+  console.log('== 15. 储值卡两套口径一致性（会员储值 / 卡-票）==');
+  // 会员金额型：手改数据或旧版数据缺 transactions 数组时，充值不能 500
+  store.write('memberships', [{ id: 'mem-broken', name: '缺流水储值卡', category: 'ecard', mode: 'amount', balance: 100 }]);
+  const u15 = (p) => new URL('https://card.example.com' + p);
+  let r15 = await routes.handle('POST', '/api/memberships/mem-broken/txn', u15('/api/memberships/mem-broken/txn'), { kind: 'topup', amount: 50 });
+  ok(r15.status === 201, '会员卡金额型充值：缺 transactions 也能写入（此前直接 push 抛 500）');
+  ok(r15.body.balance === 150, '充值后余额 100 → 150');
+  const memAfter = store.readArray('memberships')[0];
+  ok(Array.isArray(memAfter.transactions) && memAfter.transactions.length === 1, '流水数组被就地补齐并记下 1 条');
+
+  r15 = await routes.handle('POST', '/api/memberships/mem-broken/txn', u15('/api/memberships/mem-broken/txn'), { kind: 'consume', amount: 30 });
+  ok(r15.status === 201 && r15.body.balance === 120, '消费 30 后余额 120');
+  r15 = await routes.handle('POST', '/api/memberships/mem-broken/txn', u15('/api/memberships/mem-broken/txn'), { kind: 'consume', amount: 999 });
+  ok(r15.status === 400 && /余额不足/.test(String(r15.body.error)), '超额消费被拦（与卡/票共用的透支保护）');
+
+  // 卡/票金额型：同样的缺数组场景 + 统一动态流的金额符号
+  store.write('vouchers', [{ id: 'vou-broken', brand: '测试商家', name: '缺流水储值卡', type: 'storedcard', mode: 'amount', balance: 200 }]);
+  r15 = await routes.handle('POST', '/api/vouchers/vou-broken/topup', u15('/api/vouchers/vou-broken/topup'), { kind: 'consume', amount: 50 });
+  ok(r15.status === 201 && r15.body.balance === 150, '卡/票储值卡核销 50：余额 200 → 150');
+
+  const feed15 = (await routes.handle('GET', '/api/assets/feed', u15('/api/assets/feed?limit=50'), {}, null)).body;
+  const memNegative = feed15.filter((f) => f.kind === 'membership' && f.amount < 0);
+  const vouNegative = feed15.filter((f) => f.kind === 'voucher' && f.amount < 0);
+  ok(memNegative.length >= 1, '动态流：会员卡消费记负数');
+  ok(vouNegative.some((f) => f.amount === -50), '动态流：卡/票金额核销也记 -50（此前固定记 0，同一笔钱两处口径不一）');
+
+  ok(/if \(!Array\.isArray\(m\.transactions\)\) m\.transactions = \[\];\s*m\.transactions\.push\(txn\);/.test(routesSrc),
+    '会员卡金额型支行加了流水数组兜底（与次数型、券的两支对齐）');
+  ok(!/kind: 'voucher'.*amount: t\.kind === 'topup' \? Number\(t\.amount\) \|\| 0 : 0/.test(routesSrc),
+    '卡/票核销不再固定记 0');
+  ok(/\(v < 0 \? '-¥' : '¥'\)/.test(appSrc), '金额格式化：负数显示 -¥50.00 而不是 ¥-50.00');
+
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);
 }

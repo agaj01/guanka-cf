@@ -1600,6 +1600,9 @@ async function handle(method, pathname, url, body, req) {
       const txn = A.normalizeTxn({ kind: b.kind === 'topup' ? 'topup' : 'consume', amount, note: b.note, date: b.date });
       if (txn.kind === 'topup') m.balance = A.round2(m.balance + amount);
       else m.balance = A.round2(m.balance - amount);
+      // 手改数据/旧版数据可能缺流水数组：次数型与券的两支都有这层兜底，
+      // 金额型此前直接 push，缺数组时抛 TypeError 变成 500（余额已改但没写流水）
+      if (!Array.isArray(m.transactions)) m.transactions = [];
       m.transactions.push(txn);
       store.write('memberships', list);
       return json({ ok: true, balance: m.balance, txn }, 201);
@@ -1878,7 +1881,10 @@ async function handle(method, pathname, url, body, req) {
     }
     for (const v of getVouchers()) {
       for (const t of v.transactions || []) {
-        items.push({ date: t.date, createdAt: t.createdAt, kind: 'voucher', title: t.note || (t.kind === 'topup' ? '充值' : '核销'), sub: (v.brand ? v.brand + ' · ' : '') + v.name, amount: t.kind === 'topup' ? Number(t.amount) || 0 : 0 });
+        // 与会员卡口径对齐：充值记正、消费记负。此前卡/票的金额核销固定记 0，
+        // 同一笔「花掉 50 元」在动态流里会员显示 -50、卡/票显示「—」。
+        // 次数型核销的 txn.amount 本就是 0，取负仍是 0（前端显示「—」）。
+        items.push({ date: t.date, createdAt: t.createdAt, kind: 'voucher', title: t.note || (t.kind === 'topup' ? '充值' : '核销'), sub: (v.brand ? v.brand + ' · ' : '') + v.name, amount: t.kind === 'topup' ? (Number(t.amount) || 0) : -(Number(t.amount) || 0) });
       }
     }
     for (const k of getKnowledge()) {

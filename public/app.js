@@ -16,7 +16,9 @@ function esc(s) {
 
 function fmtMoney(n) {
   const v = Number(n) || 0;
-  return '¥' + v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // 负号提到货币符号前：动态流里的消费/退款行原来显示「¥-50.00」，读起来别扭
+  const abs = Math.abs(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return (v < 0 ? '-¥' : '¥') + abs;
 }
 function fmtInt(n) { return (Number(n) || 0).toLocaleString('zh-CN'); }
 function today() {
