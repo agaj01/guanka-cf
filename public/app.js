@@ -214,6 +214,20 @@ const FEE_BADGE = { default: 'badge-default', yellow: 'badge-yellow', red: 'badg
 // 属于不必要的指纹暴露。健康检查现在只回 {ok:true}，版本改由前端静态声明。
 const APP_VERSION = '2.0.0';
 
+// 新建持卡时的默认免年费类型。
+// 本项目只记笔数不记金额：只有「笔数刷免」能按卡年自动累计并算达标进度，
+// 「消费刷免」只能人工打勾（金额门槛无法判定）。所以默认落在笔数刷免，
+// 卡种库若明确标了别的类型（积分抵扣/资产存免/刚性/免年费）仍沿用卡种的值。
+const DEFAULT_WAIVER_TYPE = '笔数刷免';
+
+/** 新持卡的免年费类型默认值：卡种标注为消费刷免（或没标注）时退回笔数刷免 */
+function defaultWaiverTypeOf(card, types) {
+  const list = types || [];
+  const t = card && card.waiverType;
+  if (t && t !== '消费刷免' && (!list.length || list.includes(t))) return t;
+  return list.includes(DEFAULT_WAIVER_TYPE) ? DEFAULT_WAIVER_TYPE : (t || '免年费');
+}
+
 function fillVersion() {
   const el = document.getElementById('footer');
   if (!el) return;
@@ -607,6 +621,10 @@ function waiverCellHtml(m) {
         '</span></button>';
     }
     case '笔数刷免': {
+      // 门槛没填：服务端按「未设门槛」处理（不算达标），这里也明说，避免看着像 0/0 已完成
+      if (w.missingTarget || !(w.target > 0)) {
+        return '<span class="badge badge-default" title="点开卡片详情，在「刷免条件」里填笔数门槛（如 6）">未设笔数门槛</span>';
+      }
       const pct = w.target > 0 ? Math.min(100, Math.round((w.progress / w.target) * 100)) : 0;
       const unit = fmtInt(w.progress) + ' / ' + fmtInt(w.target) + ' 笔';
       const done = w.met;
@@ -1890,7 +1908,8 @@ function openAddCardModal() {
 /** 自定义卡片：切到「卡种信息 + 持卡信息」双段表单，隐藏卡种库选择区 */
 function openCustomCardForm(selected) {
   selected.cardId = null;
-  selected.custom = selected.custom || { bank: '', name: '', level: '', org: '', annualFee: 0, waiverType: state.meta.waiverTypes[0] || '免年费', startCredit: '' };
+  // 新建卡种时免年费类型同样默认「笔数刷免」（列表首项是「消费刷免」，不能再拿 [0]）
+  selected.custom = selected.custom || { bank: '', name: '', level: '', org: '', annualFee: 0, waiverType: DEFAULT_WAIVER_TYPE, startCredit: '' };
   $('#pick-custom-entry').style.display = 'none';
   $('#pick-search').style.display = 'none';
   $('#pick-list').style.display = 'none';
@@ -2005,8 +2024,13 @@ function myCardFormHtml(c, m) {
   const waiverTypes = state.meta.waiverTypes || ['消费刷免', '笔数刷免', '积分抵扣', '资产存免', '刚性', '免年费'];
   // 编辑时年费/免年费取持卡快照；新建时取卡种默认值
   const curFee = m ? m.annualFee : (c.annualFee || 0);
-  const curWaiverType = m ? m.waiverType : (c.waiverType || waiverTypes[0]);
-  const curWaiverCondition = m ? (m.waiverCondition || '') : (c.waiverCondition || '');
+  const curWaiverType = m ? m.waiverType : defaultWaiverTypeOf(c, waiverTypes);
+  // 门槛值跟着类型走：卡种标的是「消费刷免」（门槛写「6万」这类金额）而我们默认落到
+  // 笔数刷免时，条件留空让人自己填笔数——否则「6万」会被按笔数解析成 6 万笔，
+  // 进度永远不可能达标，反而看不出问题在哪。
+  const curWaiverCondition = m
+    ? (m.waiverCondition || '')
+    : (c.waiverType === curWaiverType ? (c.waiverCondition || '') : '');
   return (
     '<div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--gold-deep)">' + esc(c.name) + ' · ' + esc(c.bank) + '</div>' +
     '<div class="form-grid">' +
@@ -2015,12 +2039,12 @@ function myCardFormHtml(c, m) {
     field('授信额度', '<input id="f-credit" type="number" min="0" step="1000" value="' + (m ? m.creditLimit : (c.startCredit || 0)) + '">') +
     field('本月目标笔数（选填）', '<input id="f-target" type="number" min="0" step="1" value="' + (m && m.monthlyCountTarget ? m.monthlyCountTarget : 0) + '">') +
     field('年费（元）', '<input id="f-annualfee" type="number" min="0" step="0.01" value="' + esc(curFee) + '" title="以此处为准（建卡时的卡种快照可能不准，可自行修正）">') +
-    field('免年费类型', '<select id="f-waivertype">' + waiverTypes.map((t) => '<option' + (curWaiverType === t ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>') +
+    field('免年费类型', '<select id="f-waivertype" title="默认「笔数刷免」：只记笔数的模型下，只有笔数门槛能自动算达标进度">' + waiverTypes.map((t) => '<option' + (curWaiverType === t ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>') +
     field('刷免条件', '<input id="f-waivercondition" value="' + esc(curWaiverCondition) + '" placeholder="金额如 6万/60000、笔数如 10、积分如 10000" title="消费刷免/笔数刷免/积分抵扣/资产存免的达标门槛。改完后按卡年自动累计消费/笔数并联动达标状态">') +
     field('账单日（1-31）', '<input id="f-billing" type="number" min="1" max="31" value="' + (m ? m.billingDay : 1) + '">') +
     field('还款方式', '<select id="f-repaymode"><option value="fixed"' + (!m || m.repayMode !== 'afterBill' ? ' selected' : '') + '>每月固定日</option><option value="afterBill"' + (m && m.repayMode === 'afterBill' ? ' selected' : '') + '>账单日后 N 天</option></select>') +
     field('还款值', '<input id="f-repay" type="number" min="1" max="365" value="' + (m ? (m.repayValue != null ? m.repayValue : m.repaymentDay) : 20) + '" title="固定日=第几日；账单日后N天=天数">') +
-    field('宽限期（天）', '<input id="f-grace" type="number" min="0" max="30" value="' + (m ? (m.graceDays || 0) : 3) + '">') +
+    field('宽限期（天）', '<input id="f-grace" type="number" min="0" max="30" value="' + (m ? (m.graceDays || 0) : 0) + '" title="默认 0：银行到期日就是最后还款日。有宽限期的卡再填（如 3 天）">') +
     field('最长免息期（自动计算）', '<div style="padding:7px 0;font-size:13px;color:var(--text-3)">' + (m && m.payment && m.payment.maxInterestDays ? '当前 ' + m.payment.maxInterestDays + ' 天 · ' : '') + '按「下次出账第 2 天 → 该笔消费的还款日」自动算，无需填写</div>') +
     field('年费收取月（1-12）', '<input id="f-feemonth" type="number" min="1" max="12" value="' + (m ? m.feeMonth : 1) + '">') +
     field('年费收取日（1-31）', '<input id="f-feeday" type="number" min="1" max="31" value="' + (m ? m.feeDay : 1) + '">') +

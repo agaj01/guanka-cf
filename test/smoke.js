@@ -438,6 +438,57 @@ async function main() {
   ok(/interestFreeDays: Number\(payment\.interestFreeDays\) \|\| 0/.test(routesSrc), '持卡页字段改用动态口径（不再取 maxInterestDays）');
   ok(!/f-interest/.test(appSrc), '持卡表单已移除「最长免息期」输入框（改为自动计算展示）');
 
+  console.log('== 17. 新建持卡默认值：笔数刷免 / 宽限期 0 ==');
+  // 卡种标注「消费刷免」+ 金额门槛：本项目只记笔数，金额门槛无法自动判定，
+  // 所以新建持卡默认落「笔数刷免」，且不能照抄卡种那个金额门槛
+  const crFee = await routes.handle('POST', '/api/cards', url('/api/cards'), {
+    bank: '默认值银行', name: '消费刷免卡', level: '金卡', org: '银联',
+    annualFee: '600', waiverType: '消费刷免', waiverCondition: '6万',
+  }, req);
+  ok(crFee.status === 201, '准备卡种：消费刷免 + 门槛 6万');
+  let r17 = await routes.handle('POST', '/api/mycards', url('/api/mycards'), { cardId: crFee.body.id }, req);
+  ok(r17.status === 201, 'POST /api/mycards（不传免年费类型）');
+  const idDefault = r17.body.id;
+  ok(r17.body.waiverType === '笔数刷免', '消费刷免卡种 → 默认落「笔数刷免」');
+  ok(r17.body.waiverCondition === '', '类型被改默认后不照抄卡种金额门槛（否则「6万」= 6 万笔，永远达不成）');
+  ok(r17.body.graceDays === 0, '宽限期默认 0 天（原来默认 3 天）');
+
+  // 明确传了类型 → 一律听用户的，卡种门槛照旧跟着走
+  r17 = await routes.handle('POST', '/api/mycards', url('/api/mycards'), { cardId: crFee.body.id, waiverType: '消费刷免' }, req);
+  ok(r17.body.waiverType === '消费刷免' && r17.body.waiverCondition === '6万', '显式传消费刷免：类型与门槛都按卡种保留');
+  r17 = await routes.handle('POST', '/api/mycards', url('/api/mycards'), { cardId: crFee.body.id, graceDays: 3 }, req);
+  ok(r17.body.graceDays === 3, '显式传宽限期 3 天仍生效（默认值不锁死）');
+
+  // 卡种明确是别的类型时不被改默认
+  const crPts = await routes.handle('POST', '/api/cards', url('/api/cards'), {
+    bank: '默认值银行', name: '积分抵扣卡', level: '白金卡', org: '银联',
+    annualFee: '3600', waiverType: '积分抵扣', waiverCondition: '10000',
+  }, req);
+  r17 = await routes.handle('POST', '/api/mycards', url('/api/mycards'), { cardId: crPts.body.id }, req);
+  ok(r17.body.waiverType === '积分抵扣' && r17.body.waiverCondition === '10000', '卡种标了积分抵扣 → 沿用卡种类型与积分门槛');
+
+  // 笔数门槛没填时不能因为「0 笔 >= 0」就判达标（新卡一建好就显示「年费已免」，连提醒都消失）
+  const list17 = (await routes.handle('GET', '/api/mycards', url('/api/mycards'), {}, req)).body.data;
+  const mcNoTarget = list17.find((m) => m.id === idDefault);
+  ok(mcNoTarget && mcNoTarget.waiver.missingTarget === true, '门槛留空的卡被标成 missingTarget');
+  ok(mcNoTarget && mcNoTarget.waiver.met === false && mcNoTarget.feeStatus === '未达标',
+    '门槛留空 → 未达标（不是 0/0 就达标）');
+  ok(/if \(!\(target > 0\)\) \{ st\.met = false; st\.needsPayment = true;/.test(routesSrc),
+    '笔数刷免没填门槛 → 视为未达标（不再 0/0 直接判达标）');
+  ok(/missingTarget/.test(routesSrc) && /w\.missingTarget \|\| !\(w\.target > 0\)/.test(appSrc),
+    '前端对「未设门槛」单独提示，不显示 0/0 已达标');
+  ok(/但还没填笔数门槛/.test(fs.readFileSync(ROOT + '/biz/reminder.js', 'utf8')),
+    '年费提醒文案说明「还没填笔数门槛」而不是「还差 0 笔」');
+
+  // 默认值同时落在服务端与前端两侧（只改一边会两边不一致）
+  ok(/const DEFAULT_WAIVER_TYPE = '笔数刷免'/.test(routesSrc), '服务端 DEFAULT_WAIVER_TYPE = 笔数刷免');
+  ok(/function defaultWaiverTypeFor/.test(routesSrc), '服务端有 defaultWaiverTypeFor()');
+  ok(/const DEFAULT_WAIVER_TYPE = '笔数刷免'/.test(appSrc), '前端 DEFAULT_WAIVER_TYPE = 笔数刷免');
+  ok(/function defaultWaiverTypeOf/.test(appSrc), '前端有 defaultWaiverTypeOf()');
+  ok(!/waiverType: state\.meta\.waiverTypes\[0\]/.test(appSrc), '新建卡种不再拿列表首项（消费刷免）当默认');
+  ok(!/waiverTypes\[0\]/.test(appSrc), '前端不再用 waiverTypes[0] 作为免年费类型默认值');
+  ok(/\(m \? \(m\.graceDays \|\| 0\) : 0\)/.test(appSrc), '持卡表单宽限期默认 0');
+
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);
 }

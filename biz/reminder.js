@@ -111,7 +111,11 @@ function feeItem(m, days, feeDayThreshold) {
   const name = m.alias || m.name || '未命名卡片';
   let remain = '';
   if (w.kind === '消费刷免') remain = `已完成 ¥${money(w.progress)} / ¥${money(w.target)}，还差 ¥${money(w.remaining)}`;
-  else if (w.kind === '笔数刷免') remain = `已完成 ${w.progress} / ${w.target} 笔，还差 ${w.remaining} 笔`;
+  else if (w.kind === '笔数刷免') {
+    remain = (w.target > 0)
+      ? `已完成 ${w.progress} / ${w.target} 笔，还差 ${w.remaining} 笔`
+      : `已刷 ${w.progress} 笔，但还没填笔数门槛（「刷免条件」留空时无法判断是否达标）`;
+  }
   else if (w.kind === '积分抵扣') remain = '需积分抵扣，当前未抵扣';
   else if (w.kind === '资产存免') remain = '需资产达标，当前未达标';
   else if (w.kind === '刚性') remain = '刚性年费，必须缴费';

@@ -187,6 +187,15 @@ function feeStatusOf(mc, now, ws) {
 const CARD_FIELDS = ['bank', 'name', 'level', 'org', 'annualFee', 'waiverType', 'waiverCondition', 'waiverPolicy', 'startCredit', 'benefits', 'applyCondition', 'note'];
 const CSV_HEADER = ['银行', '卡片名称', '卡等级', '卡组织', '年费', '免年费类型', '刷免条件', '免年费政策', '起批额度', '主要权益', '申请条件', '备注'];
 const WAIVER_TYPES = ['消费刷免', '笔数刷免', '积分抵扣', '资产存免', '刚性', '免年费'];
+// 新建持卡的默认免年费类型。只记笔数的模型下只有「笔数刷免」能自动算达标进度，
+// 「消费刷免」必须人工打勾，所以不用它做默认；卡种库明确标了别的类型（积分抵扣/
+// 资产存免/刚性/免年费）时仍沿用卡种的值。
+const DEFAULT_WAIVER_TYPE = '笔数刷免';
+function defaultWaiverTypeFor(card) {
+  const t = card && card.waiverType;
+  if (t && t !== '消费刷免' && WAIVER_TYPES.includes(t)) return t;
+  return DEFAULT_WAIVER_TYPE;
+}
 const RESET_CYCLES = ['自然月', '自然年', '年费日', '一次性', '无固定'];
 // 权益类型（对齐金山文档权益台账的标准化取值）
 const BENEFIT_TYPES = ['境内接送机', '境外接送机', '境内机场贵宾楼', '机场龙腾悦途PP', '机场龙腾悦途PP（可餐食）', '代驾', '租车', '道路救援', '体检', '洗牙', '挂号', '挂号+导诊', '酒店优惠', '运动健身', '延误险', '积分兑换里程', '其他'];
@@ -373,6 +382,9 @@ function waiverState(mc, now, recs) {
       const target = Math.round(U.parseAmount(mc.waiverCondition));
       const progress = cardYearCountOf(recs, mc, now);
       st.target = target; st.progress = progress; st.unit = '笔';
+      // 门槛没填（或填了 0）：不能因为「0 笔 >= 0」就判达标 —— 那会让新卡一建好就显示
+      // 「年费已免」，连年费提醒也一起消失，看起来像功能坏了。按「未设门槛」处理。
+      if (!(target > 0)) { st.met = false; st.needsPayment = true; st.remaining = 0; st.missingTarget = true; break; }
       st.met = progress >= target; st.needsPayment = !st.met;
       st.remaining = Math.max(0, target - progress);
       break;
@@ -859,14 +871,19 @@ async function handle(method, pathname, url, body, req) {
         id: newId,
         cardId: card.id,
         bank: card.bank, name: card.name, org: card.org, level: card.level,
-        annualFee: card.annualFee, waiverType: card.waiverType, waiverCondition: card.waiverCondition, waiverPolicy: card.waiverPolicy,
+        // 免年费类型/门槛优先用备份里的持卡快照（用户可能改过），缺失才回退卡种库。
+        // 原来无条件取卡种库：导入自己的备份会把改过的免年费规则、门槛悄悄重置掉
+        annualFee: card.annualFee,
+        waiverType: WAIVER_TYPES.includes(m.waiverType) ? m.waiverType : (card.waiverType || DEFAULT_WAIVER_TYPE),
+        waiverCondition: m.waiverCondition != null ? String(m.waiverCondition).trim() : (card.waiverCondition || ''),
+        waiverPolicy: m.waiverPolicy != null ? String(m.waiverPolicy).trim() : (card.waiverPolicy || ''),
         alias: String(m.alias || '').trim(),
         creditLimit: nonNeg(m.creditLimit, card.startCredit),
         billingDay: clampDay(m.billingDay, 1),
         repaymentDay: repayMode === 'fixed' ? Math.min(31, Math.max(1, clampDay(m.repaymentDay, 20))) : clampDay(m.repaymentDay, 20),
         repayMode,
         repayValue: m.repayValue != null ? Math.max(0, Math.min(365, Math.round(Number(m.repayValue) || 0))) : clampDay(m.repaymentDay, 20),
-        graceDays: m.graceDays != null ? Math.max(0, Math.min(30, Math.round(Number(m.graceDays) || 0))) : 3,
+        graceDays: m.graceDays != null ? Math.max(0, Math.min(30, Math.round(Number(m.graceDays) || 0))) : 0,
         waivedYear: Math.max(0, Math.round(Number(m.waivedYear) || 0)),
         countPeriodYear: Math.max(0, Math.round(Number(m.countPeriodYear) || 0)),
         maxInterestDays: Math.max(0, Math.min(120, Math.round(Number(m.maxInterestDays) || 0))),
@@ -1234,6 +1251,13 @@ async function handle(method, pathname, url, body, req) {
     const repayValue = b.repayValue != null
       ? Math.max(0, Math.min(365, Math.round(Number(b.repayValue) || 0)))
       : clampDay(b.repaymentDay, 20);
+    // 免年费类型：没传就按卡种推导（默认笔数刷免）。
+    // 门槛值跟着类型走：类型与卡种不一致时不照抄卡种门槛——卡种写的「6万」是金额，
+    // 被笔数刷免按笔解析就是 6 万笔，永远达不成，不如留空让人填。
+    const waiverType = WAIVER_TYPES.includes(b.waiverType) ? b.waiverType : defaultWaiverTypeFor(card);
+    const waiverCondition = b.waiverCondition != null
+      ? String(b.waiverCondition).trim()
+      : (waiverType === card.waiverType ? (card.waiverCondition || '') : '');
     const mc = {
       id: U.uid(),
       cardId: card.id,
@@ -1241,8 +1265,8 @@ async function handle(method, pathname, url, body, req) {
       // 年费快照允许在添加持卡时直接覆盖：卡种库的年费规则是通用值，实际持卡常与其不同
       // （尤其是「刷 N 笔免年费」的笔数门槛——本项目只记笔数，这条必须准）
       annualFee: b.annualFee != null ? nonNeg(b.annualFee, card.annualFee) : card.annualFee,
-      waiverType: WAIVER_TYPES.includes(b.waiverType) ? b.waiverType : card.waiverType,
-      waiverCondition: b.waiverCondition != null ? String(b.waiverCondition).trim() : card.waiverCondition,
+      waiverType,
+      waiverCondition,
       waiverPolicy: b.waiverPolicy != null ? String(b.waiverPolicy).trim() : card.waiverPolicy,
       alias: String(b.alias || '').trim(),
       creditLimit: nonNeg(b.creditLimit, card.startCredit),
@@ -1250,7 +1274,8 @@ async function handle(method, pathname, url, body, req) {
       repaymentDay: repayMode === 'fixed' ? Math.min(31, Math.max(1, repayValue || 20)) : clampDay(b.repaymentDay, 20),
       repayMode,
       repayValue,
-      graceDays: b.graceDays != null ? Math.max(0, Math.min(30, Math.round(Number(b.graceDays) || 0))) : 3,
+      // 宽限期默认 0：银行到期日就是最后还款日。真有宽限期的卡（多数是 3 天）再填
+      graceDays: b.graceDays != null ? Math.max(0, Math.min(30, Math.round(Number(b.graceDays) || 0))) : 0,
       waivedYear: Math.max(0, Math.round(Number(b.waivedYear) || 0)),
       countPeriodYear: Math.max(0, Math.round(Number(b.countPeriodYear) || 0)),
       maxInterestDays: Math.max(0, Math.min(120, Math.round(Number(b.maxInterestDays) || 0))),
