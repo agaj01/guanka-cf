@@ -2021,7 +2021,7 @@ function myCardFormHtml(c, m) {
     field('还款方式', '<select id="f-repaymode"><option value="fixed"' + (!m || m.repayMode !== 'afterBill' ? ' selected' : '') + '>每月固定日</option><option value="afterBill"' + (m && m.repayMode === 'afterBill' ? ' selected' : '') + '>账单日后 N 天</option></select>') +
     field('还款值', '<input id="f-repay" type="number" min="1" max="365" value="' + (m ? (m.repayValue != null ? m.repayValue : m.repaymentDay) : 20) + '" title="固定日=第几日；账单日后N天=天数">') +
     field('宽限期（天）', '<input id="f-grace" type="number" min="0" max="30" value="' + (m ? (m.graceDays || 0) : 3) + '">') +
-    field('最长免息期（天，选填）', '<input id="f-interest" type="number" min="0" max="120" value="' + (m ? (m.maxInterestDays || 0) : 0) + '">') +
+    field('最长免息期（自动计算）', '<div style="padding:7px 0;font-size:13px;color:var(--text-3)">' + (m && m.payment && m.payment.maxInterestDays ? '当前 ' + m.payment.maxInterestDays + ' 天 · ' : '') + '按「下次出账第 2 天 → 该笔消费的还款日」自动算，无需填写</div>') +
     field('年费收取月（1-12）', '<input id="f-feemonth" type="number" min="1" max="12" value="' + (m ? m.feeMonth : 1) + '">') +
     field('年费收取日（1-31）', '<input id="f-feeday" type="number" min="1" max="31" value="' + (m ? m.feeDay : 1) + '">') +
     field('已达标年份（手工，选填）', '<input id="f-waivedyear" type="number" min="0" value="' + (m ? (m.waivedYear || 0) : 0) + '" title="填当前年份表示手工声明本年已达标/已减免">') +
@@ -2134,7 +2134,8 @@ async function saveMyCard(selected, editing) {
     repayMode: ($('#f-repaymode', form) && $('#f-repaymode', form).value) || 'fixed',
     repayValue: $('#f-repay', form).value,
     graceDays: ($('#f-grace', form) && $('#f-grace', form).value) || 0,
-    maxInterestDays: ($('#f-interest', form) && $('#f-interest', form).value) || 0,
+    // 最长免息期不再由界面提交：服务端按账单日/还款方式自动算。
+    // 这里不传，PUT 会保留旧值（字段保留只为兼容旧数据与 CSV），计算时已忽略。
     feeMonth: $('#f-feemonth', form).value,
     feeDay: $('#f-feeday', form).value,
     waivedYear: ($('#f-waivedyear', form) && $('#f-waivedyear', form).value) || 0,

@@ -196,6 +196,8 @@ const CATEGORIES = ['餐饮', '购物', '交通', '加油', '超市', '旅行', 
 // ---- 「我的持卡」批量导入 CSV ----
 // 与卡种 CSV 的区别：卡种 CSV 描述「市面上有什么卡」，本表描述「我持有哪张卡」。
 // 前 4 列（银行/卡片名称/卡组织/卡等级）是匹配卡种库的四元组，其余列是持卡人自己的数据。
+// maxInterestDays（最长免息期）已改为自动计算：保留这一列只为兼容旧 CSV / 旧备份，
+// 导入的值照旧落库但不再参与任何显示或排序。
 const MYCARD_FIELDS = [
   'bank', 'name', 'org', 'level',
   'alias', 'last4', 'creditLimit', 'monthlyCountTarget',

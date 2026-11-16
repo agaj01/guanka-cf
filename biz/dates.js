@@ -111,15 +111,18 @@ function paymentInfo(card, now) {
 
   // 最佳消费日：账单日次日消费计入下一期，免息期最长
   const bestSpendDate = new Date(nextBillDate.getFullYear(), nextBillDate.getMonth(), nextBillDate.getDate() + 1);
-  // 最长免息期：账单日 → 对应到期日的天数（用户未填时自动推导）
-  const maxInterestDays = Number(card.maxInterestDays) > 0
-    ? Number(card.maxInterestDays)
-    : diffDays(due1, nextBillDate);
+  // 最长免息期（自动计算）：下次出账的第 2 天刷卡 → 这笔钱归入再下一期账单出账 →
+  // 还到该期银行到期日。起点用 bestSpendDate（nextBillDate + 1），终点取它所属账单的到期日，
+  // 与「建议消费日」严格配套：那天刷卡的免息天数正好等于这个值。
+  // 手填的 card.maxInterestDays 不再参与计算（字段保留只为兼容旧数据与 CSV 导入）。
+  const spendBill = billDateOf(card.billingDay, bestSpendDate, 1);
+  const maxInterestDays = Math.max(0, diffDays(dueDateOf(card, spendBill), bestSpendDate));
 
   // 今天口径的免息期：今天刷卡 → 计入下期账单 → 下个账单日出账 → 该期银行到期日还款。
   // 即 diffDays(due1, now)，同时包含「今天到下个账单日」和「账单日到到期日」两段。
   // 终点只到银行到期日，不含宽限期（宽限期只进「最后可还款日 / 还款提醒」口径）。
-  // 与 maxInterestDays 的区别：后者是卡本身属性、与今天无关，仅用于详情展示。
+  // 与 maxInterestDays 的区别：后者是「理论最长」，与今天无关（有 49/50 这种随月份浮动）；
+  // 这里是从今天真刷卡算起，永远 <= maxInterestDays。
   const interestFreeDays = Math.max(0, diffDays(due1, now));
 
   return {

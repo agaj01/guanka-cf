@@ -415,16 +415,28 @@ async function main() {
   ok(D.dateStr(nextDue16) === '2026-12-25', '该期到期日取到 2026-12-25');
   ok(p16.interestFreeDays === 39, '免息期 39 天 = 11-16→12-05（19）+ 12-05→12-25（20）');
   ok(p16.interestFreeDays === D.diffDays(nextDue16, n16), '免息期 = 今天到下期到期日，不再只算「账单日→还款日」');
-  ok(p16.maxInterestDays === 20, '最长免息期仍是卡本身 账单日→还款日 的 20 天（详情页展示用）');
+  ok(p16.maxInterestDays === 50, '最长免息期 50 天 = 12-06（下次出账第 2 天）→ 01-05 出账 → 01-25 还款');
+  const bs16 = new Date(p16.bestSpendDate + 'T00:00:00'); // 本地零时，避免 UTC 解析偏到前一天
+  ok(p16.maxInterestDays === D.diffDays(D.dueDateOf(card16, D.billDateOf(5, bs16, 1)), bs16),
+    '最长免息期与「建议消费日」严格配套：那天刷卡的免息天数就等于它');
   ok(D.paymentInfo({ ...card16, graceDays: 0 }, n16).interestFreeDays === 39, '宽限期不计入免息期（0 天与 3 天同值）');
 
   // 账单日当天 / 次日：动态值在 20~49 天之间，符合「今天刷卡最晚何时还」
   ok(D.paymentInfo(card16, new Date(2026, 10, 5)).interestFreeDays === 20, '账单日当天刷卡：20 天（当天出账）');
-  ok(D.paymentInfo(card16, new Date(2026, 10, 6)).interestFreeDays === 49, '账单日次日刷卡：49 天（最长）');
+  ok(D.paymentInfo(card16, new Date(2026, 10, 6)).interestFreeDays === 49, '账单日次日刷卡：49 天（今天口径的最大值）');
+  ok(D.paymentInfo(card16, new Date(2026, 10, 5)).maxInterestDays === 49, '账单日当天的最长免息期 49 天（随月份天数浮动）');
 
+  // 手填值失效：字段保留兼容，但计算一律自动
   const p16f = D.paymentInfo({ ...card16, maxInterestDays: 99 }, n16);
-  ok(p16f.maxInterestDays === 99 && p16f.interestFreeDays === 39, '手填最长免息期不覆盖动态免息期');
+  ok(p16f.maxInterestDays === 50 && p16f.interestFreeDays === 39, '手填 99 天不再生效，最长免息期仍是自动算的 50 天');
+  // 不变式：最长 >= 当期（今天口径）
+  const inv16 = [5, 6, 16, 30].every((d) => {
+    const p = D.paymentInfo(card16, new Date(2026, 10, d));
+    return p.maxInterestDays >= p.interestFreeDays;
+  });
+  ok(inv16, '任意日期都满足 最长免息期 >= 今天口径免息期');
   ok(/interestFreeDays: Number\(payment\.interestFreeDays\) \|\| 0/.test(routesSrc), '持卡页字段改用动态口径（不再取 maxInterestDays）');
+  ok(!/f-interest/.test(appSrc), '持卡表单已移除「最长免息期」输入框（改为自动计算展示）');
 
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);
