@@ -404,6 +404,28 @@ async function main() {
     '卡/票核销不再固定记 0');
   ok(/\(v < 0 \? '-¥' : '¥'\)/.test(appSrc), '金额格式化：负数显示 -¥50.00 而不是 ¥-50.00');
 
+  console.log('== 16. 免息期口径：今天 → 下个账单日 → 到期日 ==');
+  const D = require(ROOT + '/biz/dates.js');
+  const card16 = { billingDay: 5, repayMode: 'fixed', repayValue: 25, graceDays: 3 };
+  const n16 = new Date(2026, 10, 16); // 2026-11-16，本月账单日（5 号）已过
+  const p16 = D.paymentInfo(card16, n16);
+  const nextBill16 = D.billDateOf(5, n16, 1);
+  const nextDue16 = D.dueDateOf(card16, nextBill16);
+  ok(D.dateStr(nextBill16) === '2026-12-05', '下个账单日取到 2026-12-05');
+  ok(D.dateStr(nextDue16) === '2026-12-25', '该期到期日取到 2026-12-25');
+  ok(p16.interestFreeDays === 39, '免息期 39 天 = 11-16→12-05（19）+ 12-05→12-25（20）');
+  ok(p16.interestFreeDays === D.diffDays(nextDue16, n16), '免息期 = 今天到下期到期日，不再只算「账单日→还款日」');
+  ok(p16.maxInterestDays === 20, '最长免息期仍是卡本身 账单日→还款日 的 20 天（详情页展示用）');
+  ok(D.paymentInfo({ ...card16, graceDays: 0 }, n16).interestFreeDays === 39, '宽限期不计入免息期（0 天与 3 天同值）');
+
+  // 账单日当天 / 次日：动态值在 20~49 天之间，符合「今天刷卡最晚何时还」
+  ok(D.paymentInfo(card16, new Date(2026, 10, 5)).interestFreeDays === 20, '账单日当天刷卡：20 天（当天出账）');
+  ok(D.paymentInfo(card16, new Date(2026, 10, 6)).interestFreeDays === 49, '账单日次日刷卡：49 天（最长）');
+
+  const p16f = D.paymentInfo({ ...card16, maxInterestDays: 99 }, n16);
+  ok(p16f.maxInterestDays === 99 && p16f.interestFreeDays === 39, '手填最长免息期不覆盖动态免息期');
+  ok(/interestFreeDays: Number\(payment\.interestFreeDays\) \|\| 0/.test(routesSrc), '持卡页字段改用动态口径（不再取 maxInterestDays）');
+
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);
 }

@@ -445,8 +445,9 @@ function computeMyCard(mc, now, idx) {
     yearCount,
     totalCount,
     cardYearCount,
-    // 免息期天数（账单日 → 对应到期日）：持卡页「免息期长优先」排序直接用这个字段
-    interestFreeDays: Number(payment.maxInterestDays) || 0,
+    // 免息期天数（今天 → 下个账单日 → 该期到期日）：持卡页显示与「免息期长优先」排序都用它。
+    // 手填的 maxInterestDays 只影响详情页那行「最长免息期」，不再覆盖这里的动态值。
+    interestFreeDays: Number(payment.interestFreeDays) || 0,
     feeDays: days,
     feeDaysColor: feeDaysColor(days, ws.needsPayment),
     nextFeeDate: nextFeeDateStr,

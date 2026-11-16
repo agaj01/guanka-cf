@@ -116,6 +116,12 @@ function paymentInfo(card, now) {
     ? Number(card.maxInterestDays)
     : diffDays(due1, nextBillDate);
 
+  // 今天口径的免息期：今天刷卡 → 计入下期账单 → 下个账单日出账 → 该期银行到期日还款。
+  // 即 diffDays(due1, now)，同时包含「今天到下个账单日」和「账单日到到期日」两段。
+  // 终点只到银行到期日，不含宽限期（宽限期只进「最后可还款日 / 还款提醒」口径）。
+  // 与 maxInterestDays 的区别：后者是卡本身属性、与今天无关，仅用于详情展示。
+  const interestFreeDays = Math.max(0, diffDays(due1, now));
+
   return {
     billDate: dateStr(usedBillDate),
     billMonth: dateStr(usedBillDate).slice(0, 7),
@@ -128,6 +134,7 @@ function paymentInfo(card, now) {
     repayAlert: repayAlertOf(payDaysLeft),
     bestSpendDate: dateStr(bestSpendDate),
     maxInterestDays,
+    interestFreeDays,
   };
 }
 

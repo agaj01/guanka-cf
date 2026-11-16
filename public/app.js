@@ -495,8 +495,9 @@ function needsFeeAttention(m) {
   return !!(m.waiver && m.waiver.needsPayment);
 }
 
-// 免息期天数：服务端按「账单日 → 对应到期日」算好（maxInterestDays），
-// 用户手填了 maxInterestDays 则优先用填的值。缺失时退回 0，排在最后。
+// 免息期天数：服务端按「今天 → 下个账单日 → 该期到期日」每天算好（interestFreeDays）。
+// 手填的 maxInterestDays 只影响详情页那行「最长免息期」，不参与这里 ——
+// 否则排序会退化成静态值，与卡片上显示的动态天数对不上。
 function interestFreeDaysOf(m) {
   const v = Number(m.interestFreeDays);
   return Number.isFinite(v) ? v : 0;
