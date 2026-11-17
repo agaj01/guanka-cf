@@ -489,6 +489,58 @@ async function main() {
   ok(!/waiverTypes\[0\]/.test(appSrc), '前端不再用 waiverTypes[0] 作为免年费类型默认值');
   ok(/\(m \? \(m\.graceDays \|\| 0\) : 0\)/.test(appSrc), '持卡表单宽限期默认 0');
 
+  console.log('== 18. 改卡种不再覆盖持卡自定义的免年费规则 ==');
+  const crA = await routes.handle('POST', '/api/cards', url('/api/cards'), {
+    bank: '同步银行', name: '卡A', level: '金卡', org: '银联',
+    annualFee: '0', waiverType: '免年费', waiverCondition: '0',
+  }, req);
+  const mcA = await routes.handle('POST', '/api/mycards', url('/api/mycards'), {
+    cardId: crA.body.id, waiverType: '笔数刷免', waiverCondition: '6',
+  }, req);
+  ok(mcA.body.waiverType === '笔数刷免' && mcA.body.waiverCondition === '6',
+    '准备：卡种是「免年费」，持卡自己设成「笔数刷免 6 笔」');
+
+  // 编辑卡种（改名 + 改年费，免年费类型仍是免年费）——这正是用户报的场景
+  const rA = await routes.handle('PUT', '/api/cards/' + crA.body.id, url('/api/cards/' + crA.body.id),
+    { name: '卡A-改名', annualFee: '480' }, req);
+  ok(rA.status === 200 && rA.body.name === '卡A-改名', '卡种改名 + 改年费成功');
+  let list18 = (await routes.handle('GET', '/api/mycards', url('/api/mycards'), {}, req)).body.data;
+  const gotA = list18.find((m) => m.id === mcA.body.id);
+  ok(gotA.name === '卡A-改名', '身份字段（名称）仍跟着卡种同步');
+  ok(gotA.waiverType === '笔数刷免', '持卡自己设的「笔数刷免」不再被打回卡种的「免年费」');
+  ok(gotA.waiverCondition === '6', '持卡自己的门槛 6 笔也保留（原来会被改成卡种的 0）');
+
+  // 用户没动过的字段仍要跟随卡种更新：免年费 → 刚性
+  const crB = await routes.handle('POST', '/api/cards', url('/api/cards'), {
+    bank: '同步银行', name: '卡B', level: '金卡', org: '银联',
+    annualFee: '600', waiverType: '免年费', waiverCondition: '0',
+  }, req);
+  const mcB = await routes.handle('POST', '/api/mycards', url('/api/mycards'), { cardId: crB.body.id }, req);
+  ok(mcB.body.waiverType === '免年费', '卡B 建卡时沿用卡种的「免年费」');
+  await routes.handle('PUT', '/api/cards/' + crB.body.id, url('/api/cards/' + crB.body.id), { waiverType: '刚性' }, req);
+  list18 = (await routes.handle('GET', '/api/mycards', url('/api/mycards'), {}, req)).body.data;
+  ok((list18.find((m) => m.id === mcB.body.id) || {}).waiverType === '刚性',
+    '用户没动过的免年费类型仍跟着卡种更新（免年费 → 刚性）');
+
+  // 卡种传非法值时不静默归成「免年费」（这是持卡被无辜改掉的另一条来源）
+  const rBad = await routes.handle('PUT', '/api/cards/' + crB.body.id, url('/api/cards/' + crB.body.id),
+    { waiverType: '' }, req);
+  ok(rBad.body.waiverType === '刚性', '卡种传空串类型 → 沿用原值，不静默变「免年费」');
+
+  // 源码级护栏：同步函数必须拿到卡种旧值，并且只在「持卡值 == 旧值」时才覆盖
+  ok(/function syncMyCardSnapshots\(prevCard\)/.test(routesSrc), 'syncMyCardSnapshots 接收卡种旧值');
+  ok(/if \(curVal === oldVal\) mc\[key\] = c\[key\]/.test(routesSrc), '只有持卡值等于旧值时才跟随卡种');
+  ok(/syncMyCardSnapshots\(prevCard\)/.test(routesSrc), 'PUT 卡种时把旧值传进同步函数');
+  ok(/if \(incoming\.waiverType != null && !WAIVER_TYPES\.includes\(incoming\.waiverType\)\) delete incoming\.waiverType/.test(routesSrc),
+    '非法免年费类型不静默改成「免年费」');
+
+  console.log('== 19. 弹窗不会「自己关掉」（遮罩误判）==');
+  ok(/function shouldCloseOnBackdrop/.test(appSrc), '遮罩关闭判定抽成 shouldCloseOnBackdrop()');
+  ok(/if \(!st\.downOnWrap\) return false/.test(appSrc), '按下不在遮罩上就不算点外部（拖选文字/拖滚动条松手）');
+  ok(/Date\.now\(\) - st\.openedAt < 300/.test(appSrc), '刚打开的 300ms 内不响应遮罩点击（防双击穿透）');
+  ok(/Math\.abs\(\(ev\.clientX \|\| 0\) - st\.downX\) > 6/.test(appSrc), '有拖动（>6px）不关窗');
+  ok(/e\.target\.closest\('\[data-close\]'\)/.test(appSrc), '「取消 / ✕」按钮仍立即生效');
+
   console.log('\n========== 冒烟结果: ' + pass + ' 通过 / ' + fail + ' 失败 ==========');
   process.exit(fail ? 1 : 0);
 }

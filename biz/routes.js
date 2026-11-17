@@ -736,13 +736,18 @@ async function handle(method, pathname, url, body, req) {
     const cards = getCards();
     const idx = cards.findIndex((c) => c.id === cardMatch[1]);
     if (idx < 0) return err('卡种不存在', 404);
-    const merged = { ...cards[idx], ...(body || {}) };
+    const incoming = { ...(body || {}) };
+    // 免年费类型只认已知取值：传了非法值（空串、脏数据）时忽略它，沿用原值。
+    // 否则 normalizeCard 会把它静默归成「免年费」——这正是持卡被无辜改成免年费的一条来源。
+    if (incoming.waiverType != null && !WAIVER_TYPES.includes(incoming.waiverType)) delete incoming.waiverType;
+    const merged = { ...cards[idx], ...incoming };
     const c = normalizeCard(merged, cards[idx].id);
     if (cards.some((x, i) => i !== idx && cardKey(x) === cardKey(c))) return err('已存在相同「银行 + 卡片名称 + 卡组织 + 卡等级」的卡种');
+    const prevCard = cards[idx];   // 同步快照时要拿旧值判断「用户有没有自己改过」
     cards[idx] = c;
     store.write('cards', cards);
     // 同步持卡快照
-    syncMyCardSnapshots();
+    syncMyCardSnapshots(prevCard);
     return json(c);
   }
   if (cardMatch && method === 'DELETE') {
@@ -2191,8 +2196,12 @@ async function runNotifyChecksInner(force) {
   return Object.assign({ skipped: false }, out);
 }
 
-// 卡种信息变更后同步所有持卡的快照字段
-function syncMyCardSnapshots() {
+// 卡种信息变更后同步持卡的快照字段。
+// 只同步「用户没改过」的字段：持卡上的值仍等于卡种改动之前的旧值时，才跟着更新；
+// 用户自己改过的（例如把卡种里的「免年费」改成持卡上的「笔数刷免 + 6 笔」）一律保留。
+// 原实现无条件覆盖 年费/免年费类型/门槛/政策 —— 在卡种库里改一下权益或起批额度，
+// 所有持卡的免年费规则就被打回卡种的值（「笔数刷免」变回「免年费」），且没有任何提示。
+function syncMyCardSnapshots(prevCard) {
   const myCards = getMyCards();
   // 先建一次索引：此前在循环内每次 getCards().find(...)，复杂度 O(持卡数 × 卡种数)
   const byId = new Map(getCards().map((c) => [c.id, c]));
@@ -2201,8 +2210,16 @@ function syncMyCardSnapshots() {
     const c = byId.get(mc.cardId);
     if (!c) continue;
     const before = JSON.stringify(mc);
+    // 身份字段跟着卡种走：改的是同一张卡，卡种改名/换组织后持卡一起变
     mc.bank = c.bank; mc.name = c.name; mc.org = c.org; mc.level = c.level;
-    mc.annualFee = c.annualFee; mc.waiverType = c.waiverType; mc.waiverCondition = c.waiverCondition; mc.waiverPolicy = c.waiverPolicy;
+    // 业务字段只在「持卡上的值 == 卡种改之前的旧值」时跟随，否则视为用户自定义，保留
+    if (prevCard) {
+      for (const key of ['annualFee', 'waiverType', 'waiverCondition', 'waiverPolicy']) {
+        const oldVal = prevCard[key] == null ? '' : String(prevCard[key]).trim();
+        const curVal = mc[key] == null ? '' : String(mc[key]).trim();
+        if (curVal === oldVal) mc[key] = c[key];
+      }
+    }
     if (JSON.stringify(mc) !== before) changed = true;
   }
   if (changed) store.write('mycards', myCards);

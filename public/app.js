@@ -1857,6 +1857,20 @@ function bindDrawerEvents(m) {
 }
 
 // ---------- 通用弹窗 ----------
+// 点遮罩关闭的判定：必须同时满足三条，否则会出现「填到一半弹窗自己关了」。
+//  1) 按下和抬起都在遮罩上 —— 在输入框里拖选文字、或拖 .modal-body 滚动条后松手到
+//     遮罩上，浏览器会把 click 派发到 down/up 的最近共同祖先（就是遮罩），
+//     e.target === wrap 会成立，看起来就跟点了一下遮罩一样。
+//  2) 不是刚打开那段时间内的连点 —— 双击「添加持卡」时第二下正好落在遮罩中央。
+//  3) 鼠标没拖动（位移不超过 6px）。
+function shouldCloseOnBackdrop(ev, wrap, st) {
+  if (!st.downOnWrap) return false;
+  if (Date.now() - st.openedAt < 300) return false;
+  if (Math.abs((ev.clientX || 0) - st.downX) > 6) return false;
+  if (Math.abs((ev.clientY || 0) - st.downY) > 6) return false;
+  return ev.target === wrap;
+}
+
 function openModal(titleHtml, bodyHtml, footerHtml) {
   const root = $('#modal-root');
   root.innerHTML =
@@ -1869,8 +1883,17 @@ function openModal(titleHtml, bodyHtml, footerHtml) {
     '</div></div>';
   const wrap = $('#modal-wrap');
   requestAnimationFrame(() => wrap.classList.add('show'));
+  // st 记录「这次按下是不是从遮罩开始的」以及按下的时间/坐标，供上面三条判定用
+  const st = { openedAt: Date.now(), downOnWrap: false, downX: 0, downY: 0 };
+  wrap.addEventListener('mousedown', (e) => {
+    st.downOnWrap = e.target === wrap;
+    st.downX = e.clientX || 0;
+    st.downY = e.clientY || 0;
+  });
   wrap.addEventListener('click', (e) => {
-    if (e.target === wrap || e.target.closest('[data-close]')) closeModal();
+    // 显式按钮（取消 / ✕）照旧立即生效，不受上面三条限制
+    if (e.target.closest('[data-close]')) { closeModal(); return; }
+    if (shouldCloseOnBackdrop(e, wrap, st)) closeModal();
   });
   return $('#modal');
 }
